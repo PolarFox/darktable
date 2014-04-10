@@ -766,6 +766,124 @@ compute_downsampling_kernel_sse(
  * Sample interpolation function (see usage in iop/lens.c and iop/clipping.c)
  * ------------------------------------------------------------------------*/
 
+// trivial border extrapolation by averaging the neighborhood, may be improved
+void
+dt_extrapolate_boundaries_sample(
+  float* in,
+  const int x,
+  const int y,
+  const int xmin,
+  const int ymin,
+  const int xmax,
+  const int ymax,
+  const int samplestride,
+  const int linestride)
+{
+  if (!isnan(in[y*linestride + x*samplestride])) return;
+  int r = MAX(MAX(xmin - x, x - xmax), MAX(ymin - y, y - ymax));
+  if (r <= 0) return;
+  r = 2*r + 1;
+  double sum = 0.;
+  double norm = 0;
+  for (int i = MAX(xmin, x - r + 1); i <= MIN(xmax, x + r - 1); i++)
+    for (int j = MAX(ymin, y - r + 1); j <= MIN(ymax, y + r - 1); j++)
+    {
+      double d2 = (i-x)*(i-x)+(j-y)*(j-y);
+      double k = 1 - d2/(r*r);
+      if (k > 0)
+      {
+        sum += k * in[j*linestride + i*samplestride];
+        norm += k;
+      }
+    }
+  if (norm > 0)
+    in[y*linestride + x*samplestride] = sum/norm;
+}
+
+float
+dt_interpolation_compute_extrapolated_sample(
+  const struct dt_interpolation* itor,
+  float* in,
+  const float x,
+  const float y,
+  const int xmin,
+  const int ymin,
+  const int xmax,
+  const int ymax,
+  const int samplestride,
+  const int linestride)
+{
+  assert(itor->width < 8);
+  assert(xmin <= xmax);
+  assert(ymin <= ymax);
+  const int w = itor->width;
+
+  float kernelx[16] __attribute__((aligned(SSE_ALIGNMENT)));
+  float kernely[16] __attribute__((aligned(SSE_ALIGNMENT)));
+
+  int bx = floor(x - w) + 1;
+  int by = floor(y - w) + 1;
+  int ex = ceil(x + w) - 1;
+  int ey = ceil(y + w) - 1;
+  int wx = ex - bx;
+  int wy = ey - by;
+  float fx = x - bx;
+  float fy = y - by;
+
+  // Part of the sampling area is outside the image's boundaries
+  if (bx < xmin || by < ymin || ex > xmax || ey > ymax)
+    for (int i = bx; i <= ex; i++)
+      for (int j = by; j <= ey; j++)
+        if (i < xmin || j < ymin || i > xmax || j > ymax)
+          dt_extrapolate_boundaries_sample(
+            in, i, j, xmin, ymin, xmax, ymax, samplestride, linestride);
+
+  // Prepare t vector to compute four values a loop
+  static const __m128 bootstrap = {  0.f, -1.f, -2.f, -3.f};
+  static const __m128 iter  = { -4.f, -4.f, -4.f, -4.f};
+  __m128 vw = _mm_set_ps1((float)w);
+  __m128 vtx = _mm_add_ps(_mm_set_ps1(fx), bootstrap);
+  __m128 vty = _mm_add_ps(_mm_set_ps1(fy), bootstrap);
+
+  // Compute both horizontal and vertical kernels
+  for (int i = 0; i <= wx; i += 4)
+  {
+    *(__m128*)(kernelx+i) = itor->funcsse(vw, vtx);
+    vtx = _mm_add_ps(vtx, iter);
+  }
+  for (int i = 0; i <= wy; i += 4)
+  {
+    *(__m128*)(kernely+i) = itor->funcsse(vw, vty);
+    vty = _mm_add_ps(vty, iter);
+  }
+
+  // Compute normals
+  float normx = 0;
+  float normy = 0;
+  for (int i = 0; i <= wx; i++)
+    normx += kernelx[i];
+  for (int i = 0; i <= wy; i++)
+    normy += kernely[i];
+
+  // Go to top left pixel
+  float *p = (float *)in + by*linestride + bx*samplestride;
+
+  // Apply the kernel
+  float s = 0.f;
+  for (int i = 0; i <= wy; i++)
+  {
+    float h = 0.0f;
+    for (int j = 0; j <= wx; j++)
+    {
+      h += kernelx[j]*p[j*samplestride];
+    }
+    s += kernely[i]*h;
+    p += linestride;
+  }
+
+  return s/(normx*normy);
+}
+
 float
 dt_interpolation_compute_sample(
   const struct dt_interpolation* itor,
