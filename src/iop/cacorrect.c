@@ -36,12 +36,13 @@ DT_MODULE_INTROSPECTION(1, dt_iop_cacorrect_params_t)
 
 typedef struct dt_iop_cacorrect_params_t
 {
-  int keep;
+  int type;
 }
 dt_iop_cacorrect_params_t;
 
 typedef struct dt_iop_cacorrect_gui_data_t
 {
+  GtkWidget *tcombo;
 }
 dt_iop_cacorrect_gui_data_t;
 
@@ -52,6 +53,7 @@ dt_iop_cacorrect_global_data_t;
 
 typedef struct dt_iop_cacorrect_data_t
 {
+  int type;
 }
 dt_iop_cacorrect_data_t;
 
@@ -78,6 +80,16 @@ static int get_legacy()
   return dt_conf_get_int("plugins/darkroom/cacorrect/legacy");
 }
 
+static int get_degree()
+{
+  return dt_conf_get_int("plugins/darkroom/cacorrect/degree");
+}
+
+static int get_radial_degree()
+{
+  return dt_conf_get_int("plugins/darkroom/cacorrect/radial_degree");
+}
+
 static int get_displayed()
 {
   return dt_conf_get_int("plugins/darkroom/cacorrect/display");
@@ -86,6 +98,18 @@ static int get_displayed()
 static int get_visuals()
 {
   return dt_conf_get_int("plugins/darkroom/cacorrect/visuals");
+}
+
+int
+legacy_params (dt_iop_module_t *self, const void *const old_params, const int old_version, void *new_params, const int new_version)
+{
+  if (old_version == 1 && new_version == 2)
+  {
+    dt_iop_cacorrect_params_t *new = new_params;
+    new->type = 0;
+    return 0;
+  }
+  return 1;
 }
 
 int
@@ -113,12 +137,6 @@ void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *
   roi_in->y = 0;
   roi_in->width = piece->pipe->image.width;
   roi_in->height = piece->pipe->image.height;
-}
-
-static int
-FC(const int row, const int col, const unsigned int filters)
-{
-  return filters >> (((row << 1 & 14) + (col & 1)) << 1) & 3;
 }
 
 /*==============================================================================
@@ -239,12 +257,20 @@ LinEqSolve(int nDim, double* pfMatr, double* pfVect, double* pfSolution)
 
 //todo: can we cache the analyse phase somehow?
 
+__attribute__((optimize("O3","Ofast")))
 static void
 CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const float *const in, float *out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
+  dt_iop_cacorrect_params_t *p = (dt_iop_cacorrect_params_t *)self->params;
+  const int radial = p->type == 1;
+  int gdegree = get_degree();
+  if (gdegree <= 0) gdegree = 4; // default value
+  int rdegree = get_radial_degree();
+  if (rdegree <= 0) rdegree = 1; // default value
+
   const int width  = roi_in->width;
   const int height = roi_in->height;
-
+  const int msize = MIN(width, height);
 #if CACORRECT_DEBUG
   printf("cacorrect: i.w=%d i.h=%d i.x=%d i.y=%d\n",
          roi_in->width, roi_in->height, roi_in->x, roi_in->y);
@@ -253,24 +279,21 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
 #endif
 
   const uint32_t filters = dt_image_flipped_filter(&piece->pipe->image);
+  const int ca = (filters >> (((0 << 1 & 14) + (0 & 1)) << 1) & 3) != 1;
+  const int fb = (filters >> (((!ca << 1 & 14) + (0 & 1)) << 1) & 3) == 2;
 
   const int sl = 8; // max allowed CA shift, must be even
   const int srad = 22; // size of samples, must be even
-  const int subs = 22; // spacing between samples, must be even
-  const int deg = 4; // order of 2-variables polynomial fit
+  const int subs = srad; // spacing between samples, must be even
+  const int deg = radial ? rdegree : gdegree; // order of polynomial fit
 
-  const int degnum = ((deg + 1) * (deg + 2)) / 2;
-
-  const double gamma_analyse = 2.2; // experimental gammas
-  const double gamma_shift = 2.2;
+  const int degnum = radial ? deg : ((deg + 1) * (deg + 2)) / 2;
 
   const int TS = (width > 2024 && height > 2024) ? 256 : 128;
   const int border = 2 + srad + sl;
-  const int ncoeff = 2;
+  const int ncoeff = radial ? 1 : 2;
 
   int visuals = get_visuals();
-  if (visuals == 1 && piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT)
-    visuals = 0;
 
   // polynomial fit coefficients
   double fitmat[2][ncoeff][degnum*degnum];
@@ -294,6 +317,7 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
     }
 
 #if CACORRECT_DEBUG
+  clock_t time0 = clock();
   printf("pre-analysis\n");
 #endif
 
@@ -305,8 +329,8 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
   for (int top = 0; top < height; top += TS - 2*border)
     for (int left = 0; left < width; left += TS - 2*border)
     {
-      int rm = top + TS > height ? height - top : TS;
-      int cm = left + TS > width ? width - left : TS;
+      const int rm = top + TS > height ? height - top : TS;
+      const int cm = left + TS > width ? width - left : TS;
 
       float rgb[TS][TS];
       float la[TS][TS][2];
@@ -316,16 +340,15 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
         {
           int inr = top + r;
           int inc = left + c;
-          rgb[r][c] = in[inr*width+inc];
-          rgb[r][c] = pow(rgb[r][c], 1/gamma_analyse);
+          rgb[r][c] = sqrt(in[inr*width + inc]); // gamma = 2.0 (experimental)
         }
 
       // compute derivatives
       for (int r = 2; r < rm - 2; r++)
         for (int c = 2; c < cm - 2; c++)
           {
-            la[r][c][0] = (rgb[r+2][c] - rgb[r-2][c])/4;
-            la[r][c][1] = (rgb[r][c+2] - rgb[r][c-2])/4;
+            la[r][c][0] = (rgb[r+2][c] - rgb[r-2][c]) /* /4 */;
+            la[r][c][1] = (rgb[r][c+2] - rgb[r][c-2]) /* /4 */;
           }
 
       // thread-local components to be summed up
@@ -358,112 +381,172 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
               inc < border || inc > width - 1 - border)
             continue;
 
-          double y = 2.0 * (2.0 * (double)inr/height - 1);
-          double x = 2.0 * (2.0 * (double)inc/width - 1);
+          const double y = 2. * (double)inr/msize - (double)height/msize;
+          const double x = 2. * (double)inc/msize - (double)width/msize;
 
+          // compute variation map
+          float t[2][2*sl+1][2*sl+1];
           for (int color = 0; color < 2; color++)
-          {
-
-            // compute variation map
-            double t[2*sl+1][2*sl+1];
             for (int i = 0; i < 2*sl+1; i++)
               for (int j = 0; j < 2*sl+1; j++)
-                t[i][j] = 0.;
+                t[color][i][j] = 0.;
 
-            for (int gi = -srad; gi < srad; gi++)
-              for (int gj = -srad; gj < srad; gj++)
+          for (int gi = -srad; gi < srad; gi++)
+            for (int gj = -srad+((gi+ca)&1); gj < srad; gj+=2)
+            {
+              float dgv = la[r+gi][c+gj][0];
+              float dgh = la[r+gi][c+gj][1];
+              int B = (gi+fb)&1;
+              int R = !B;
+              for (int di = -sl+1; di <= sl; di+=2)
+                for (int dj = -sl; dj <= sl; dj+=2)
+                  // the test is too costy if the loop is not unrolled
+                  /* if (di*di + dj*dj < (int)((sl+0.5)*(sl+0.5))) */
+                {
+                  float kvR = la[r+gi+di][c+gj+dj][0] - dgv;
+                  float khR = la[r+gi+di][c+gj+dj][1] - dgh;
+                  float kvB = la[r+gi+dj][c+gj+di][0] - dgv;
+                  float khB = la[r+gi+dj][c+gj+di][1] - dgh;
+                  t[R][di+sl][dj+sl] += kvR * kvR + khR * khR;
+                  t[B][dj+sl][di+sl] += kvB * kvB + khB * khB;
+                }
+            }
+
+          double bc[2][2] = { };
+          double bw[2][2] = { };
+          for (int color = 0; color < 2; color++)
+          {
+            // compute averages and locate indexed minimum
+            int I = 0;
+            int J = 0;
+            float min = INFINITY;
+            for (int di = -sl+1; di <= sl-1; di++)
+              for (int dj = -sl+1+!(di&1); dj <= sl-1; dj+=2)
               {
-                if (FC(inr+gi, inc+gj, filters) != 1) continue;
-                double dgv = la[r+gi][c+gj][0];
-                double dgh = la[r+gi][c+gj][1];
-                for (int di = -sl; di <= sl; di++)
-                  for (int dj = -sl; dj <= sl; dj++)
-                    if (FC(inr+gi+di, inc+gj+dj, filters) == 2*color)
-                      if (di*di + dj*dj < (int)((sl+0.5)*(sl+0.5))) // mask
-                      {
-                        double dcv = la[r+gi+di][c+gj+dj][0];
-                        double dch = la[r+gi+di][c+gj+dj][1];
-                        double kv = dcv - dgv;
-                        double kh = dch - dgh;
-                        t[di+sl][dj+sl] += kv * kv + kh * kh;
-                      }
+                int d2 = di*di + dj*dj;
+                if (d2 < (int)((sl-0.5)*(sl-0.5))) // mask
+                {
+                  float sum =
+                    t[color][di+sl+1][dj+sl] + t[color][di+sl-1][dj+sl] +
+                    t[color][di+sl][dj+sl+1] + t[color][di+sl][dj+sl-1];
+                  t[color][di+sl][dj+sl] = sum /* /4 */;
+                  if (sum < min)
+                    if (d2 < (int)((sl-2.5)*(sl-2.5))) // mask
+                    { min = sum; I = di; J = dj; }
+                }
               }
 
-            // compute averages and locate indexed minimum
-            int I = 0, J = 0;
-            double min = INFINITY;
-            for (int di = -sl+1; di <= sl-1; di++)
-              for (int dj = -sl+1+(~di&1); dj <= sl-1; dj += 2)
-                if (di*di + dj*dj < (int)((sl-0.5)*(sl-0.5))) // mask
-                {
-                  double sum = t[di+sl+1][dj+sl] + t[di+sl-1][dj+sl]
-                    + t[di+sl][dj+sl+1] + t[di+sl][dj+sl-1];
-                  t[di+sl][dj+sl] = sum/4;
-                  if (di*di + dj*dj < (int)((sl-2.5)*(sl-2.5))) // mask
-                    if (sum < min) { min = sum; I = di; J = dj; }
-                }
-
-            // adjustments
-            double bc[2] = { 0 };
-            double bw[2] = { 0 };
+            // find shift estimation and weights
             {
               int i = I + sl;
               int j = J + sl;
-              double dv = (t[i+2][j] - t[i-2][j])/4;
-              double dh = (t[i][j+2] - t[i][j-2])/4;
-              double d2v = (t[i+2][j] + t[i-2][j] - 2*t[i][j])/8;
-              double d2h = (t[i][j+2] + t[i][j-2] - 2*t[i][j])/8;
-              double d2m =
-                (t[i+1][j+1] - t[i-1][j+1] - t[i+1][j-1] + t[i-1][j-1])/4;
+              double dv = (t[color][i+2][j] - t[color][i-2][j]) /* /4 */;
+              double dh = (t[color][i][j+2] - t[color][i][j-2]) /* /4 */;
+              double d2v = (t[color][i+2][j] + t[color][i-2][j]
+                            - 2*t[color][i][j])/2 /* /4 */;
+              double d2h = (t[color][i][j+2] + t[color][i][j-2]
+                            - 2*t[color][i][j])/2 /* /4 */;
+              double d2m = (t[color][i+1][j+1] - t[color][i-1][j+1] -
+                            t[color][i+1][j-1] + t[color][i-1][j-1]) /* /4 */;
               double div = 4*d2v*d2h - d2m*d2m;
               if (div > 0)
               {
-                double sqrtD = sqrt((d2v-d2h)*(d2v-d2h) + d2m*d2m);
-                /* double sin2th = d2m / sqrtD; */
-                double cos2th = (d2v - d2h) / sqrtD;
-                double sqsinth = (1 - cos2th)/2;
-                double sqcosth = (1 + cos2th)/2;
-                double lb = (d2v+d2h + sqrtD)/2;
-                double ls = (d2v+d2h - sqrtD)/2;
+                double d2d = d2v - d2h;
+                double sqrtD = sqrt(d2d*d2d + d2m*d2m);
+                double lb = (d2v + d2h + sqrtD)/2;
+                double ls = (d2v + d2h - sqrtD)/2;
+                double lb2 = lb * lb;
+                double ls2 = ls * ls;
                 double pv = -(2*dv*d2h - dh*d2m) / div;
                 double ph = -(2*dh*d2v - dv*d2m) / div;
-                pv = isnan(pv) ? 0 : CLAMP(pv, -2.5, +2.5);
-                ph = isnan(ph) ? 0 : CLAMP(ph, -2.5, +2.5);
-                bc[0] = I + pv;
-                bc[1] = J + ph;
-                // weights (deviations are in 1/l^2)
-                bw[0] = 1/(sqrt(sqcosth/(lb*lb) + sqsinth/(ls*ls)));
-                bw[1] = 1/(sqrt(sqsinth/(lb*lb) + sqcosth/(ls*ls)));
+                double sv = I + CLAMP(pv, -2.5, +2.5);
+                double sh = J + CLAMP(ph, -2.5, +2.5);
+                if (radial)
+                {
+                  double rad = sqrt(x*x + y*y);
+                  if (rad != 0)
+                  {
+                    double theta = atan2(d2m, d2d)/2;
+                    double delta = atan2(x, y);
+                    double cosd = cos(theta - delta);
+                    double sind = sin(theta - delta);
+                    bc[color][0] = (y*sv + x*sh)/rad;
+                    // weight (deviations are in 1/l^2)
+                    bw[color][0] = 1/(sqrt(cosd*cosd/lb2 + sind*sind/ls2));
+                  }
+                }
+                else
+                {
+                  /* double sin2th = d2m / sqrtD; */
+                  double cos2th = d2d / sqrtD;
+                  double sqsinth = (1 - cos2th)/2;
+                  double sqcosth = (1 + cos2th)/2;
+                  bc[color][0] = sv;
+                  bc[color][1] = sh;
+                  // weights (deviations are in 1/l^2)
+                  bw[color][0] = 1/(sqrt(sqcosth/lb2 + sqsinth/ls2));
+                  bw[color][1] = 1/(sqrt(sqsinth/lb2 + sqcosth/ls2));
+                }
               }
             }
+          }
 
-            // show weights
-            if (visuals)
+          // show weights
+          if (visuals)
+          {
+            const int rad = 6;
+            int outr = inr + roi_in->y - roi_out->y;
+            int outc = inc + roi_in->x - roi_out->x + !((outr+ca)&1);
+            int outi = outr*roi_out->width + outc;
+            if (outr >= rad && outr < roi_out->height - rad &&
+                outc >= rad && outc < roi_out->width - rad)
             {
-              int outr = inr + roi_in->y - roi_out->y;
-              int outc = inc + roi_in->x - roi_out->x;
-              int off = FC(inr, inc, filters)&1;
-              int outi = outr*roi_out->width+outc;
-              if (outr >= 4 && outr < roi_out->height - 4
-                  && outc >= 4 && outc < roi_out->width - 4)
-              {
-                double s = 25*sqrt(bw[0]*bw[0]+bw[1]*bw[1]);
-                for (int di = -6; di <= 6; di++)
-                  for (int dj = -6; dj <= 6; dj++)
-                    if (FC(inr+di, inc+dj+off, filters) == 1)
-                      out[outi+di*roi_out->width+dj+off] +=
-                        MIN(1,s*exp(1.5*(-di*di-dj*dj)));
-              }
+              double s =
+                sqrt(bw[0][0]*bw[0][0] + bw[0][1]*bw[0][1])/4 +
+                sqrt(bw[1][0]*bw[1][0] + bw[1][1]*bw[1][1])/4;
+              for (int di = -rad; di <= rad; di++)
+                for (int dj = -rad+!(di&1); dj <= rad; dj+=2)
+                {
+                  int d2 = di*di + dj*dj;
+                  if (d2 < rad*rad)
+                    out[outi + di*roi_out->width + dj] +=
+                      MIN(0.5, s/expf(1.5*d2));
+                }
             }
+          }
 
 #if CACORRECT_DEBUG
-            if (y > -0.1 && y < 0.1 && x > -0.1 && x < 0.1)
-            {
-              printf("x=%+.4lf y=%+.4lf g=%.2lf ", x, y, rgb[r][c]);
-              printf("%+.5f (%.5f) %+.5f (%.5f)\n", bc[0], bw[0], bc[1], bw[1]);
-            }
+          if (y > -0.05 && y < 0.05 && x > -0.05 && x < 0.05)
+          {
+            printf("x=%+.4lf y=%+.4lf g=%.2lf r ", x, y, rgb[r][c]);
+            printf("%+.5f (%8.4f) %+.5f (%8.4f)\n", bc[0][0], bw[0][0], bc[0][1], bw[0][1]);
+            printf("x=%+.4lf y=%+.4lf g=%.2lf b ", x, y, rgb[r][c]);
+            printf("%+.5f (%8.4f) %+.5f (%8.4f)\n", bc[1][0], bw[1][0], bc[1][1], bw[1][1]);
+          }
 #endif
 
+          if (radial)
+          {
+            double rad = sqrt(x*x + y*y);
+            double pir = rad; // pow_i(rad)
+            int iobs = 0;
+            for (int i = 1; i <= deg; i++, pir *= rad)
+            {
+              int ideg = 0;
+              double pnr = rad; // pow_n(rad)
+              for (int n = 1; n <= deg; n++, pnr *= rad)
+              {
+                for (int color = 0; color < 2; color++)
+                  tfitmat[color][0][iobs*degnum+ideg] += pir*bw[color][0]*pnr;
+                ideg++;
+              }
+              for (int color = 0; color < 2; color++)
+                tfitvec[color][0][iobs] += pir*bw[color][0]*bc[color][0];
+              iobs++;
+            }
+          }
+          else
+          {
             double piy = 1.; // pow_i(y)
             int iobs = 0;
             for (int i = 0; i <= deg; i++, piy *= y)
@@ -480,23 +563,26 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
                   for (int n = 0; n <= deg - m; n++, pnx *= x)
                   {
                     for (int coeff = 0; coeff < ncoeff; coeff++)
-                    {
-                      double v = o*bw[coeff]*pmy*pnx;
-                      tfitmat[color][coeff][iobs*degnum+ideg] += v;
-                    }
+                      for (int color = 0; color < 2; color++)
+                      {
+                        double v = o*bw[color][coeff]*pmy*pnx;
+                        tfitmat[color][coeff][iobs*degnum+ideg] += v;
+                      }
                     ideg++;
                   }
                 }
                 for (int coeff = 0; coeff < ncoeff; coeff++)
-                {
-                  double v = o*bw[coeff]*bc[coeff];
-                  tfitvec[color][coeff][iobs] += v;
-                }
+                  for (int color = 0; color < 2; color++)
+                  {
+                    double v = o*bw[color][coeff]*bc[color][coeff];
+                    tfitvec[color][coeff][iobs] += v;
+                  }
                 iobs++;
               }
             }
           }
         }
+
 
 #ifdef _OPENMP
 #pragma omp critical
@@ -516,6 +602,8 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
   // end of pre-analysis
 
 #if CACORRECT_DEBUG
+  clock_t time1 = clock();
+  printf("time: %f\n", (float)(time1-time0)/CLOCKS_PER_SEC);
   printf("solve\n");
 #endif
 
@@ -538,6 +626,8 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
   // shifting red and blue layers
 
 #if CACORRECT_DEBUG
+  clock_t time2 = clock();
+  printf("time: %f\n", (float)(time2-time1)/CLOCKS_PER_SEC);
   printf("shift\n");
 #endif
 
@@ -549,35 +639,29 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
   for (int top = -margin; top < height - margin; top += TS - 2*margin)
     for (int left = -margin; left < width - margin; left += TS - 2*margin)
     {
-      int rm = top + TS > height + margin ? height + margin - top : TS;
-      int cm = left + TS > width + margin ? width + margin - left : TS;
+      const int rm = top + TS > height + margin ? height + margin - top : TS;
+      const int cm = left + TS > width + margin ? width + margin - left : TS;
 
       float rgb[TS][TS];
 
       for (int r = 0; r < rm; r++)
-        for (int c = 0; c < cm; c++)
-          {
-            int inr = top + r;
-            int inc = left + c;
-            if (FC(inr, inc, filters) == 1) continue;
-            if (inr < 0 || inr >= height || inc < 0 || inc >= width)
-            {
-              rgb[r][c] = 0./0.; // nan values will be extrapolated
-            }
-            else
-            {
-              rgb[r][c] = in[inr*width+inc];
-              rgb[r][c] = pow(rgb[r][c], 1/gamma_shift);
-            }
-          }
+        for (int c = 0+!((r+ca)&1); c < cm; c+=2)
+        {
+
+          int inr = top + r;
+          int inc = left + c;
+          if (inr < 0 || inr >= height || inc < 0 || inc >= width)
+            rgb[r][c] = 0./0.; // nan values will be extrapolated
+          else
+            rgb[r][c] = sqrt(in[inr*width + inc]); // gamma = 2.0
+        }
 
       for (int r = margin; r < rm - margin; r++)
-        for (int c = margin; c < cm - margin; c++)
+        for (int c = margin+!((r+ca)&1); c < cm - margin; c+=2)
         {
           int inr = top + r;
           int inc = left + c;
-          if (FC(inr, inc, filters) == 1) continue;
-          int color = FC(inr, inc, filters)/2;
+          int color = (r+fb)&1;
 
           int outr = inr + roi_in->y - roi_out->y;
           int outc = inc + roi_in->x - roi_out->x;
@@ -586,23 +670,48 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
             continue;
 
           double bc[2] = { 0 };
-          double y = 2.0 * (2.0 * (double)inr/height - 1);
-          double x = 2.0 * (2.0 * (double)inc/width - 1);
+          const double y = 2. * (double)inr/msize - (double)height/msize;
+          const double x = 2. * (double)inc/msize - (double)width/msize;
 
           // compute polynomial
-          int ideg = 0;
-          double pmy = 1.; // pow_m(y)
-          for (int m = 0; m <= deg; m++, pmy *= y)
+          if (radial)
           {
-            double pnx = 1.; // pow_n(x)
-            for (int n = 0; n <= deg - m; n++, pnx *= x)
+            double rad = sqrt(x*x + y*y);
+            if (rad == 0)
             {
-              for (int coeff = 0; coeff < ncoeff; coeff++)
+              bc[0] = 0.;
+              bc[1] = 0.;
+            }
+            else
+            {
+              double v = 0;
+              int ideg = 0;
+              double pnr = rad; // pow_n(rad)
+              for (int n = 1; n <= deg; n++, pnr *= rad)
               {
-                double o = pmy*pnx;
-                bc[coeff] += o*fitsol[color][coeff][ideg];
+                v += pnr*fitsol[color][0][ideg];
+                ideg++;
               }
-              ideg++;
+              bc[0] = v*y/rad;
+              bc[1] = v*x/rad;
+            }
+          }
+          else
+          {
+            int ideg = 0;
+            double pmy = 1.; // pow_m(y)
+            for (int m = 0; m <= deg; m++, pmy *= y)
+            {
+              double pnx = 1.; // pow_n(x)
+              for (int n = 0; n <= deg - m; n++, pnx *= x)
+              {
+                for (int coeff = 0; coeff < ncoeff; coeff++)
+                {
+                  double o = pmy*pnx;
+                  bc[coeff] += o*fitsol[color][coeff][ideg];
+                }
+                ideg++;
+              }
             }
           }
 
@@ -628,22 +737,23 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
             for (double l = 0; l <= sl; l += 0.5)
             {
               double d = norm - l;
-              if (fabs(d) < 0.01) {
+              if ((-0.01 < d && d < -0.005) || (0 < d && d < 0.01))
+              {
                 v *= d >= 0 ? 1.75 : 1.5;
                 v += d > 0 ? 0.2 : 0.075;
               }
             }
           }
 
-          v = pow(v, gamma_shift);
-
-          out[outr*roi_out->width+outc] = v;
-
+          out[outr*roi_out->width + outc] = v*v; // gamma = 2.0
         }
     }
 
 #if CACORRECT_DEBUG
-  printf("end\n");
+  clock_t time3 = clock();
+  printf("time: %f\n", (float)(time3-time2)/CLOCKS_PER_SEC);
+  printf("done\n");
+  printf("cacorrect: %f s (cpu time)\n", (float)(time3-time0)/CLOCKS_PER_SEC);
 #endif
 
 }
@@ -657,17 +767,17 @@ void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void 
     for (int j = 0; j < roi_out->width; j++)
       out[i*roi_out->width+j] =
         in[(i+roi_out->y-roi_in->y)*roi_in->width+(j+roi_out->x-roi_in->x)];
-  int type = get_legacy();
-  if (type == 0)
+  int legacy = get_legacy();
+  if (legacy == 0)
     CA_correct(self, piece, in, out, roi_in, roi_out);
-  else if (type == 1)
+  else if (legacy == 1)
     CA_correct_old(self, piece, in, out, roi_in, roi_out);
 }
 
 void reload_defaults(dt_iop_module_t *module)
 {
   // init defaults:
-  dt_iop_cacorrect_params_t tmp = { 50 };
+  dt_iop_cacorrect_params_t tmp = { 0 };
   memcpy(module->params, &tmp, sizeof(dt_iop_cacorrect_params_t));
   memcpy(module->default_params, &tmp, sizeof(dt_iop_cacorrect_params_t));
 
@@ -705,15 +815,17 @@ void cleanup(dt_iop_module_t *module)
 /** commit is the synch point between core and gui, so it copies params to pipe data. */
 void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
+  dt_iop_cacorrect_params_t *p = (dt_iop_cacorrect_params_t *)params;
+  dt_iop_cacorrect_data_t *d = (dt_iop_cacorrect_data_t *)piece->data;
+  d->type = p->type;
   // preview pipe doesn't have mosaiced data either:
   if (!(pipe->image.flags & DT_IMAGE_RAW)
      || dt_dev_pixelpipe_uses_downsampled_input(pipe))
     piece->enabled = 0;
   if (piece->pipe->type == DT_DEV_PIXELPIPE_THUMBNAIL)
     piece->enabled = 0;
-  if (get_displayed() == 0 && piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT)
+  if (!get_displayed() && piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT)
     piece->enabled = 0;
-
 }
 
 void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
@@ -729,12 +841,38 @@ void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev
 
 void gui_update(dt_iop_module_t *self)
 {
+  dt_iop_cacorrect_gui_data_t *g = (dt_iop_cacorrect_gui_data_t *)self->gui_data;
+  dt_iop_cacorrect_params_t *p = (dt_iop_cacorrect_params_t *)self->params;
+  if (p->type < 0 || p->type > 2) p->type = 0; // compat
+  dt_bauhaus_combobox_set(g->tcombo, p->type);
+}
+
+void profile_changed(GtkWidget *widget, dt_iop_module_t *self)
+{
+  dt_iop_cacorrect_gui_data_t *g = (dt_iop_cacorrect_gui_data_t *)self->gui_data;
+  dt_iop_cacorrect_params_t *p  = (dt_iop_cacorrect_params_t *)self->params;
+  if(self->dt->gui->reset) return;
+  p->type = dt_bauhaus_combobox_get(g->tcombo);
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 void gui_init(dt_iop_module_t *self)
 {
   self->gui_data = malloc(sizeof(dt_iop_cacorrect_gui_data_t));
   self->widget = gtk_vbox_new(TRUE, DT_BAUHAUS_SPACE);
+  dt_iop_cacorrect_gui_data_t *g =
+    (dt_iop_cacorrect_gui_data_t *)self->gui_data;
+
+  self->widget = gtk_vbox_new(TRUE, DT_BAUHAUS_SPACE);
+  g->tcombo = dt_bauhaus_combobox_new(self);
+  dt_bauhaus_widget_set_label(g->tcombo, NULL, _("type"));
+  dt_bauhaus_combobox_clear(g->tcombo);
+  dt_bauhaus_combobox_add(g->tcombo, _("generic"));
+  dt_bauhaus_combobox_add(g->tcombo, _("radial"));
+  g_signal_connect (G_OBJECT (g->tcombo), "value-changed",
+                    G_CALLBACK (profile_changed),
+                    (gpointer)self);
+  gtk_box_pack_start(GTK_BOX(self->widget), g->tcombo, TRUE, TRUE, 0);
 }
 
 void gui_cleanup(dt_iop_module_t *self)

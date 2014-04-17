@@ -2,6 +2,13 @@
 * begin raw therapee code, hg checkout of june 05, 2013 branch master.
 *==================================================================================*/
 
+int
+FC(const int row, const int col, const unsigned int filters)
+{
+  return filters >> ((((row) << 1 & 14) + ((col) & 1)) << 1) & 3;
+}
+
+
 static void
 CA_correct_old(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const float *const in, float *out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
@@ -994,8 +1001,8 @@ This is the approximate _optical_ location of the R/B pixels */
         for (row=rr+top, cc=border+(FC(rr,2,filters)&1); cc < cc1-border; cc+=2)
         {
           col = cc + left;
-          int outr = rr + roi_in->y - roi_out->y;
-          int outc = cc + roi_in->x - roi_out->x;
+          int outr = row + roi_in->y - roi_out->y;
+          int outc = col + roi_in->x - roi_out->x;
           indx = outr*roi_out->width + outc;
           if (outr < 0 || outr >= roi_out->height
               || outc < 0 || outc >= roi_out->width)
