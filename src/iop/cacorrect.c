@@ -54,6 +54,7 @@ dt_iop_cacorrect_global_data_t;
 typedef struct dt_iop_cacorrect_data_t
 {
   int type;
+  void *fitdata;
 }
 dt_iop_cacorrect_data_t;
 
@@ -261,21 +262,27 @@ __attribute__((optimize("O3","Ofast")))
 static void
 CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const float *const in, float *out, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  dt_iop_cacorrect_params_t *p = (dt_iop_cacorrect_params_t *)self->params;
-  const int radial = p->type == 1;
+  dt_iop_cacorrect_data_t *d = piece->data;
+
+  const int radial = d->type == 1;
   int gdegree = get_degree();
   if (gdegree <= 0) gdegree = 4; // default value
   int rdegree = get_radial_degree();
   if (rdegree <= 0) rdegree = 1; // default value
 
-  const int width  = roi_in->width;
-  const int height = roi_in->height;
-  const int msize = MIN(width, height);
+  const int iwidth  = roi_in->width;
+  const int iheight = roi_in->height;
+  const int msize = MIN(iwidth, iheight);
+  const int owidth  = roi_out->width;
+  const int oheight = roi_out->height;
+  const int offv = roi_in->y - roi_out->y;
+  const int offh = roi_in->x - roi_out->x;
+
 #if CACORRECT_DEBUG
   printf("cacorrect: i.w=%d i.h=%d i.x=%d i.y=%d\n",
-         roi_in->width, roi_in->height, roi_in->x, roi_in->y);
+         iwidth, iheight, roi_in->x, roi_in->y);
   printf("cacorrect: o.w=%d o.h=%d o.x=%d o.y=%d\n",
-         roi_out->width, roi_out->height, roi_out->x, roi_out->y);
+         owidth, oheight, roi_out->x, roi_out->y);
 #endif
 
   const uint32_t filters = dt_image_flipped_filter(&piece->pipe->image);
@@ -289,7 +296,7 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
 
   const int degnum = radial ? deg : ((deg + 1) * (deg + 2)) / 2;
 
-  const int TS = (width > 2024 && height > 2024) ? 256 : 128;
+  const int TS = (iwidth > 2024 && iheight > 2024) ? 256 : 128;
   const int border = 2 + srad + sl;
   const int ncoeff = radial ? 1 : 2;
 
@@ -301,10 +308,23 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
   double fitsol[2][ncoeff][degnum];
 
   // these small sizes aren't safe to run through the code below.
-  if (height < 3 * border || width < 3 * border) return;
+  if (iheight < 3 * border || iwidth < 3 * border) return;
 
   const struct dt_interpolation *ip_trans =
     dt_interpolation_new(DT_INTERPOLATION_USERPREF);
+
+#if CACORRECT_DEBUG
+  clock_t time_begin = clock();
+  clock_t time_start = time_begin;
+  clock_t time_end;
+#endif
+
+  // load the fit if already computed
+  if (d->fitdata)
+  {
+    memcpy(fitsol, d->fitdata, sizeof(fitsol));
+    goto shift;
+  }
 
   // initialize fit arrays
   for (int color = 0; color < 2; color++)
@@ -317,7 +337,6 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
     }
 
 #if CACORRECT_DEBUG
-  clock_t time0 = clock();
   printf("pre-analysis\n");
 #endif
 
@@ -326,11 +345,11 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-  for (int top = 0; top < height; top += TS - 2*border)
-    for (int left = 0; left < width; left += TS - 2*border)
+  for (int top = 0; top < iheight; top += TS - 2*border)
+    for (int left = 0; left < iwidth; left += TS - 2*border)
     {
-      const int rm = top + TS > height ? height - top : TS;
-      const int cm = left + TS > width ? width - left : TS;
+      const int rm = top + TS > iheight ? iheight - top : TS;
+      const int cm = left + TS > iwidth ? iwidth - left : TS;
 
       float rgb[TS][TS];
       float la[TS][TS][2];
@@ -338,9 +357,20 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
       for (int r = 0; r < rm; r++)
         for (int c = 0; c < cm; c++)
         {
-          int inr = top + r;
-          int inc = left + c;
-          rgb[r][c] = sqrt(in[inr*width + inc]); // gamma = 2.0 (experimental)
+          const int inr = top + r;
+          const int inc = left + c;
+#if __SSE2__
+          const float *p = in + inr*iwidth + inc;
+          while (c + 4 < cm)
+          {
+            __m128 v = _mm_loadu_ps(p);
+            v = _mm_sqrt_ps(v);
+            _mm_storeu_ps(&rgb[r][c], v);
+            c += 4;
+            p += 4;
+          }
+#endif
+          rgb[r][c] = sqrt(in[inr*iwidth + inc]); // gamma = 2.0 (experimental)
         }
 
       // compute derivatives
@@ -359,16 +389,16 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
         for (int coeff = 0; coeff < ncoeff; coeff++)
         {
           for (int i = 0; i < degnum*degnum; i++)
-            tfitmat[color][coeff][i] = 0;
+            tfitmat[color][coeff][i] = 0.;
           for (int i = 0; i < degnum; i++)
-            tfitvec[color][coeff][i] = 0;
+            tfitvec[color][coeff][i] = 0.;
         }
 
       // compute centered offsets for sampling areas
-      int rsuboff = (height/4 - border/2) % subs < subs/2 ? 0 : subs/2;
-      int csuboff = (width/4 - border/2) % subs < subs/2 ? 0 : subs/2;
-      int roff = (height/4 + rsuboff - (top + border)/2) % subs;
-      int coff = (width/4 + csuboff - (left + border)/2) % subs;
+      int rsuboff = (iheight/4 - border/2) % subs < subs/2 ? 0 : subs/2;
+      int csuboff = (iwidth/4 - border/2) % subs < subs/2 ? 0 : subs/2;
+      int roff = (iheight/4 + rsuboff - (top + border)/2) % subs;
+      int coff = (iwidth/4 + csuboff - (left + border)/2) % subs;
       if (roff < 0) roff += subs;
       if (coff < 0) coff += subs;
 
@@ -377,12 +407,12 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
         {
           int inr = top + r;
           int inc = left + c;
-          if (inr < border || inr > height - 1 - border ||
-              inc < border || inc > width - 1 - border)
+          if (inr < border || inr > iheight - 1 - border ||
+              inc < border || inc > iwidth - 1 - border)
             continue;
 
-          const double y = 2. * (double)inr/msize - (double)height/msize;
-          const double x = 2. * (double)inc/msize - (double)width/msize;
+          const double y = 2. * (double)inr/msize - (double)iheight/msize;
+          const double x = 2. * (double)inc/msize - (double)iwidth/msize;
 
           // compute variation map
           float t[2][2*sl+1][2*sl+1];
@@ -394,10 +424,10 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
           for (int gi = -srad; gi < srad; gi++)
             for (int gj = -srad+((gi+ca)&1); gj < srad; gj+=2)
             {
-              float dgv = la[r+gi][c+gj][0];
-              float dgh = la[r+gi][c+gj][1];
-              int B = (gi+fb)&1;
-              int R = !B;
+              const float dgv = la[r+gi][c+gj][0];
+              const float dgh = la[r+gi][c+gj][1];
+              const int B = (gi+fb)&1;
+              const int R = !B;
               for (int di = -sl+1; di <= sl; di+=2)
                 for (int dj = -sl; dj <= sl; dj+=2)
                   // the test is too costy if the loop is not unrolled
@@ -495,22 +525,24 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
           if (visuals)
           {
             const int rad = 6;
-            int outr = inr + roi_in->y - roi_out->y;
-            int outc = inc + roi_in->x - roi_out->x + !((outr+ca)&1);
-            int outi = outr*roi_out->width + outc;
-            if (outr >= rad && outr < roi_out->height - rad &&
-                outc >= rad && outc < roi_out->width - rad)
+            int outr = inr + offv;
+            int outc = inc + offh + !((outr+ca)&1);
+            int outi = outr*owidth + outc;
+            if (outr >= rad && outr < oheight - rad &&
+                outc >= rad && outc < owidth - rad)
             {
-              double s =
+              const double s =
                 sqrt(bw[0][0]*bw[0][0] + bw[0][1]*bw[0][1])/4 +
                 sqrt(bw[1][0]*bw[1][0] + bw[1][1]*bw[1][1])/4;
-              for (int di = -rad; di <= rad; di++)
-                for (int dj = -rad+!(di&1); dj <= rad; dj+=2)
+              for (int di = -rad+1; di <= rad; di+=2)
+                for (int dj = -rad; dj <= rad; dj+=2)
                 {
                   int d2 = di*di + dj*dj;
                   if (d2 < rad*rad)
-                    out[outi + di*roi_out->width + dj] +=
-                      MIN(0.5, s/expf(1.5*d2));
+                  {
+                    out[outi+di*owidth+dj] += MIN(0.5, s/exp(1.5*d2));
+                    out[outi+dj*owidth+di] += MIN(0.5, s/exp(1.5*d2));
+                  }
                 }
             }
           }
@@ -518,16 +550,16 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
 #if CACORRECT_DEBUG
           if (y > -0.05 && y < 0.05 && x > -0.05 && x < 0.05)
           {
-            printf("x=%+.4lf y=%+.4lf g=%.2lf r ", x, y, rgb[r][c]);
-            printf("%+.5f (%8.4f) %+.5f (%8.4f)\n", bc[0][0], bw[0][0], bc[0][1], bw[0][1]);
-            printf("x=%+.4lf y=%+.4lf g=%.2lf b ", x, y, rgb[r][c]);
-            printf("%+.5f (%8.4f) %+.5f (%8.4f)\n", bc[1][0], bw[1][0], bc[1][1], bw[1][1]);
+            printf("x=%+.4lf y=%+.4lf g=%.2lf r  ", x, y, rgb[r][c]);
+            printf("%+.5f (%8.4f)  %+.5f (%8.4f)\n", bc[0][0], bw[0][0], bc[0][1], bw[0][1]);
+            printf("x=%+.4lf y=%+.4lf g=%.2lf b  ", x, y, rgb[r][c]);
+            printf("%+.5f (%8.4f)  %+.5f (%8.4f)\n", bc[1][0], bw[1][0], bc[1][1], bw[1][1]);
           }
 #endif
 
           if (radial)
           {
-            double rad = sqrt(x*x + y*y);
+            const double rad = sqrt(x*x + y*y);
             double pir = rad; // pow_i(rad)
             int iobs = 0;
             for (int i = 1; i <= deg; i++, pir *= rad)
@@ -602,8 +634,9 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
   // end of pre-analysis
 
 #if CACORRECT_DEBUG
-  clock_t time1 = clock();
-  printf("time: %f\n", (float)(time1-time0)/CLOCKS_PER_SEC);
+  time_end = clock();
+  printf("time: %f\n", (float)(time_end-time_start)/CLOCKS_PER_SEC);
+  time_start = time_end;
   printf("solve\n");
 #endif
 
@@ -623,68 +656,81 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
       }
     }
 
-  // shifting red and blue layers
+  // store the fit
+  d->fitdata = malloc(sizeof(fitsol));
+  memcpy(d->fitdata, fitsol, sizeof(fitsol));
+
+  // now shifting red and blue layers
 
 #if CACORRECT_DEBUG
-  clock_t time2 = clock();
-  printf("time: %f\n", (float)(time2-time1)/CLOCKS_PER_SEC);
+  time_end = clock();
+  printf("time: %f\n", (float)(time_end-time_start)/CLOCKS_PER_SEC);
+  time_start = time_end;
   printf("shift\n");
 #endif
+
+shift:;
 
   const int margin = sl + 8; // 8 for interpolation
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-  for (int top = -margin; top < height - margin; top += TS - 2*margin)
-    for (int left = -margin; left < width - margin; left += TS - 2*margin)
+  for (int top = -margin; top < oheight; top += TS - 2*margin)
+    for (int left = -margin; left < owidth; left += TS - 2*margin)
     {
-      const int rm = top + TS > height + margin ? height + margin - top : TS;
-      const int cm = left + TS > width + margin ? width + margin - left : TS;
+      const int rm = top + TS > oheight + margin ? oheight + margin - top : TS;
+      const int cm = left + TS > owidth + margin ? owidth + margin - left : TS;
 
       float rgb[TS][TS];
 
       for (int r = 0; r < rm; r++)
         for (int c = 0+!((r+ca)&1); c < cm; c+=2)
         {
-
-          int inr = top + r;
-          int inc = left + c;
-          if (inr < 0 || inr >= height || inc < 0 || inc >= width)
-            rgb[r][c] = 0./0.; // nan values will be extrapolated
+          const int inr = top + r - offv;
+          const int inc = left + c - offh;
+          if (inr >= 0 && inr < iheight && inc >= 0 && inc < iwidth)
+          {
+#if __SSE2__ // not so efficient
+            const float *p = in + inr*iwidth + inc;
+            while (c + 8 < MIN(cm, iwidth - left + offh))
+            {
+              __m128 v;
+              for (int i = 0; i < 4; i++)
+                v[i] = p[2*i];
+              v = _mm_sqrt_ps(v);
+              for (int i = 0; i < 4; i++)
+                rgb[r][c+2*i] = v[i];
+              p += 8;
+              c += 8;
+            }
+#endif
+            rgb[r][c] = sqrt(in[inr*iwidth + inc]); // gamma = 2.0
+          }
           else
-            rgb[r][c] = sqrt(in[inr*width + inc]); // gamma = 2.0
+            rgb[r][c] = 0./0.; // nan values will be extrapolated
         }
 
       for (int r = margin; r < rm - margin; r++)
         for (int c = margin+!((r+ca)&1); c < cm - margin; c+=2)
         {
-          int inr = top + r;
-          int inc = left + c;
-          int color = (r+fb)&1;
-
-          int outr = inr + roi_in->y - roi_out->y;
-          int outc = inc + roi_in->x - roi_out->x;
-          if (outr < 0 || outr >= roi_out->height
-              || outc < 0 || outc >= roi_out->width)
-            continue;
+          const int outr = top + r;
+          const int outc = left + c;
+          const int inr = outr - offv;
+          const int inc = outc - offh;
+          const int color = (r+fb)&1;
 
           double bc[2] = { 0 };
-          const double y = 2. * (double)inr/msize - (double)height/msize;
-          const double x = 2. * (double)inc/msize - (double)width/msize;
+          const double y = 2. * (double)inr/msize - (double)iheight/msize;
+          const double x = 2. * (double)inc/msize - (double)iwidth/msize;
 
-          // compute polynomial
+          // compute the polynomial
           if (radial)
           {
-            double rad = sqrt(x*x + y*y);
-            if (rad == 0)
+            const double rad = sqrt(x*x + y*y);
+            if (rad != 0.)
             {
-              bc[0] = 0.;
-              bc[1] = 0.;
-            }
-            else
-            {
-              double v = 0;
+              double v = 0.;
               int ideg = 0;
               double pnr = rad; // pow_n(rad)
               for (int n = 1; n <= deg; n++, pnr *= rad)
@@ -706,23 +752,20 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
               for (int n = 0; n <= deg - m; n++, pnx *= x)
               {
                 for (int coeff = 0; coeff < ncoeff; coeff++)
-                {
-                  double o = pmy*pnx;
-                  bc[coeff] += o*fitsol[color][coeff][ideg];
-                }
+                  bc[coeff] += pmy*pnx*fitsol[color][coeff][ideg];
                 ideg++;
               }
             }
           }
 
-          double bv = CLAMPS(bc[0], -sl, sl);
-          double bh = CLAMPS(bc[1], -sl, sl);
+          const double bv = CLAMPS(bc[0], -sl, sl);
+          const double bh = CLAMPS(bc[1], -sl, sl);
 
           // shift by interpolation
-          int xmin = MAX(-inc, -margin);
-          int ymin = MAX(-inr, -margin);
-          int xmax = MIN(width-1-inc, +margin);
-          int ymax = MIN(height-1-inr, +margin);
+          const int xmin = MAX(-inc, -margin);
+          const int ymin = MAX(-inr, -margin);
+          const int xmax = MIN(iwidth-1-inc, +margin);
+          const int ymax = MIN(iheight-1-inr, +margin);
           double v =
             dt_interpolation_compute_extrapolated_sample(
               ip_trans, &rgb[r][c], bh/2, bv/2,
@@ -730,13 +773,13 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
 
           v = MAX(0., v);
 
-          // show shift lines
+          // show shift norms as isos
           if (visuals)
           {
-            double norm = sqrt(bv*bv + bh*bh);
+            const double norm = sqrt(bv*bv + bh*bh);
             for (double l = 0; l <= sl; l += 0.5)
             {
-              double d = norm - l;
+              const double d = norm - l;
               if ((-0.01 < d && d < -0.005) || (0 < d && d < 0.01))
               {
                 v *= d >= 0 ? 1.75 : 1.5;
@@ -745,20 +788,20 @@ CA_correct(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const fl
             }
           }
 
-          out[outr*roi_out->width + outc] = v*v; // gamma = 2.0
+          out[outr*owidth + outc] = v*v; // gamma = 2.0
         }
     }
 
 #if CACORRECT_DEBUG
-  clock_t time3 = clock();
-  printf("time: %f\n", (float)(time3-time2)/CLOCKS_PER_SEC);
-  printf("done\n");
-  printf("cacorrect: %f s (cpu time)\n", (float)(time3-time0)/CLOCKS_PER_SEC);
+  time_end = clock();
+  printf("time: %f\n", (float)(time_end-time_start)/CLOCKS_PER_SEC);
+  time_start = time_end;
+  printf("cacorrect: %f seconds (cpu time)\n",
+         (float)(time_end-time_begin)/CLOCKS_PER_SEC);
 #endif
 
 }
 
-/** process, all real work is done here. */
 void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void *i, void *o, const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
 {
   float *in = (float *)i;
@@ -767,6 +810,10 @@ void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void 
     for (int j = 0; j < roi_out->width; j++)
       out[i*roi_out->width+j] =
         in[(i+roi_out->y-roi_in->y)*roi_in->width+(j+roi_out->x-roi_in->x)];
+
+  if (piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT && !get_displayed())
+    if (!dt_control_get_dev_zoom()) return;
+
   int legacy = get_legacy();
   if (legacy == 0)
     CA_correct(self, piece, in, out, roi_in, roi_out);
@@ -789,12 +836,10 @@ void reload_defaults(dt_iop_module_t *module)
   module->default_enabled = 0;
 }
 
-/** init, cleanup, commit to pipeline */
 void init(dt_iop_module_t *module)
 {
   module->params = malloc(sizeof(dt_iop_cacorrect_params_t));
   module->default_params = malloc(sizeof(dt_iop_cacorrect_params_t));
-  module->data = NULL;
   module->gui_data = NULL;
   // our module is disabled by default
   module->default_enabled = 0;
@@ -809,22 +854,17 @@ void cleanup(dt_iop_module_t *module)
   free(module->params);
   module->params = NULL;
   module->gui_data = NULL;
-  module->data = NULL;
 }
 
-/** commit is the synch point between core and gui, so it copies params to pipe data. */
 void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
   dt_iop_cacorrect_params_t *p = (dt_iop_cacorrect_params_t *)params;
   dt_iop_cacorrect_data_t *d = (dt_iop_cacorrect_data_t *)piece->data;
   d->type = p->type;
+  d->fitdata = NULL;
   // preview pipe doesn't have mosaiced data either:
   if (!(pipe->image.flags & DT_IMAGE_RAW)
      || dt_dev_pixelpipe_uses_downsampled_input(pipe))
-    piece->enabled = 0;
-  if (piece->pipe->type == DT_DEV_PIXELPIPE_THUMBNAIL)
-    piece->enabled = 0;
-  if (!get_displayed() && piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT)
     piece->enabled = 0;
 }
 
@@ -836,6 +876,10 @@ void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pi
 
 void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
+  dt_iop_cacorrect_data_t *d = piece->data;
+  if (d->fitdata)
+    free (d->fitdata);
+  d->fitdata = NULL;
   free(piece->data);
 }
 
