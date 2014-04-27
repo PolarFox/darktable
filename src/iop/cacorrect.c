@@ -349,11 +349,11 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
         int c = 0;
         const int inr = top + r;
         const int inc = left + c;
-        const float *pi = in + inr*iwidth + inc;
+        const float *pi = in + iwidth*inr + inc;
         float *po = &rgb[r][c];
 #if __SSE2__
         for (; c + 3 < cm; pi += 4, po += 4, c += 4)
-          _mm_store_ps(po, _mm_sqrt_ps(_mm_load_ps(pi)));
+          _mm_store_ps(po, _mm_sqrt_ps(_mm_loadu_ps(pi)));
 #endif
         for (; c < cm; pi += 1, po += 1, c += 1)
           *po = sqrt(*pi);
@@ -511,9 +511,9 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
           if (visuals)
           {
             const int rad = 6;
-            int outr = inr + offv;
-            int outc = inc + offh + !((outr+ca)&1);
-            int outi = outr*owidth + outc;
+            const int outr = inr + offv;
+            const int outc = inc + offh + !((outr+ca)&1);
+            float *outp = out + owidth*outr + outc;
             if (outr >= rad && outr < oheight - rad &&
                 outc >= rad && outc < owidth - rad)
             {
@@ -526,8 +526,8 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
                   int d2 = di*di + dj*dj;
                   if (d2 < rad*rad)
                   {
-                    out[outi+di*owidth+dj] += fmin(0.5, s/exp(1.5*d2));
-                    out[outi+dj*owidth+di] += fmin(0.5, s/exp(1.5*d2));
+                    outp[owidth*di+dj] += fmin(0.5, s/exp(1.5*d2));
+                    outp[owidth*dj+di] += fmin(0.5, s/exp(1.5*d2));
                   }
                 }
             }
