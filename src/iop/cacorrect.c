@@ -290,8 +290,7 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
   const int offh = roi_in->x - roi_out->x;
 
   const uint32_t filters = dt_image_flipped_filter(&piece->pipe->image);
-  const int ca = (filters >> (((0 << 1 & 14) + (0 & 1)) << 1) & 3) != 1;
-  const int fb = (filters >> (((!ca << 1 & 14) + (0 & 1)) << 1) & 3) == 2;
+  const int ca = (filters & 3) != 1, fb = (filters >> (!ca << 2) & 3) == 2;
 
   const int sl = CA_SHIFT;
   const int radial = d->type == 1;
@@ -343,7 +342,7 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
       const int rm = top + TS > iheight ? iheight - top : TS;
       const int cm = left + TS > iwidth ? iwidth - left : TS;
 
-      float rgb[TS][TS];
+      float rgb[TS][TS] __attribute__((aligned(16)));
       // assume gamma = 2.0 (experimental)
       for (int r = 0; r < rm; r++)
       {
@@ -353,17 +352,11 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
         const float *pi = in + inr*iwidth + inc;
         float *po = &rgb[r][c];
 #if __SSE2__
-        while (c + 3 < cm)
-        {
-          _mm_storeu_ps(po, _mm_sqrt_ps(_mm_loadu_ps(pi)));
-          pi += 4; po += 4; c += 4;
-        }
+        for (; c + 3 < cm; pi += 4, po += 4, c += 4)
+          _mm_store_ps(po, _mm_sqrt_ps(_mm_load_ps(pi)));
 #endif
-        while (c < cm)
-        {
+        for (; c < cm; pi += 1, po += 1, c += 1)
           *po = sqrt(*pi);
-          pi += 1; po += 1; c += 1;
-        }
       }
 
       float la[TS][TS][2];
@@ -404,8 +397,8 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
               inc < border || inc > iwidth - 1 - border)
             continue;
 
-          const double y = 2. * (double)inr/msize - (double)iheight/msize;
-          const double x = 2. * (double)inc/msize - (double)iwidth/msize;
+          const double y = (2.*inr - iheight + 1)/(msize - 1);
+          const double x = (2.*inc - iwidth + 1)/(msize - 1);
 
           // compute variation map
           float t[2][2*sl+1][2*sl+1];
@@ -415,15 +408,15 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
                 t[color][i][j] = 0.;
 
           for (int gi = -srad; gi < srad; gi++)
-            for (int gj = -srad+((gi+ca)&1); gj < srad; gj+=2)
+            for (int gj = -srad+((gi+ca)&1); gj < srad; gj += 2)
             {
               const float dgv = la[r+gi][c+gj][0];
               const float dgh = la[r+gi][c+gj][1];
               const int B = (gi+fb)&1;
               const int R = !B;
-              for (int di = -sl+1; di <= sl; di+=2)
-                for (int dj = -sl; dj <= sl; dj+=2)
-                  // the test is too costy if the loop is not unrolled
+              for (int di = -sl+1; di <= sl; di += 2)
+                for (int dj = -sl; dj <= sl; dj += 2)
+                  // this test is too costy if the loop is not unrolled
                   /* if (di*di + dj*dj < (int)((sl+0.5)*(sl+0.5))) */
                 {
                   float kvR = la[r+gi+di][c+gj+dj][0] - dgv;
@@ -439,12 +432,12 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
           double bw[2][2] = { };
           for (int color = 0; color < 2; color++)
           {
-            // compute averages and locate indexed minimum
+            // compute star averages and locate indexed minimum
             int I = 0;
             int J = 0;
             float min = INFINITY;
             for (int di = -sl+1; di <= sl-1; di++)
-              for (int dj = -sl+1+!(di&1); dj <= sl-1; dj+=2)
+              for (int dj = -sl+1+!(di&1); dj <= sl-1; dj += 2)
               {
                 int d2 = di*di + dj*dj;
                 if (d2 < (int)((sl-0.5)*(sl-0.5))) // mask
@@ -527,8 +520,8 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
               const double s =
                 sqrt(bw[0][0]*bw[0][0] + bw[0][1]*bw[0][1])/4 +
                 sqrt(bw[1][0]*bw[1][0] + bw[1][1]*bw[1][1])/4;
-              for (int di = -rad+1; di <= rad; di+=2)
-                for (int dj = -rad; dj <= rad; dj+=2)
+              for (int di = -rad+1; di <= rad; di += 2)
+                for (int dj = -rad; dj <= rad; dj += 2)
                 {
                   int d2 = di*di + dj*dj;
                   if (d2 < rad*rad)
@@ -552,6 +545,7 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
           }
 #endif
 
+          // fill up parameters for the fitting
           if (radial)
           {
             const double rad = sqrt(x*x + y*y);
@@ -687,8 +681,7 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
 #endif
 
   const uint32_t filters = dt_image_flipped_filter(&piece->pipe->image);
-  const int ca = (filters >> (((0 << 1 & 14) + (0 & 1)) << 1) & 3) != 1;
-  const int fb = (filters >> (((!ca << 1 & 14) + (0 & 1)) << 1) & 3) == 2;
+  const int ca = (filters & 3) != 1, fb = (filters >> (!ca << 2) & 3) == 2;
 
   const int sl = CA_SHIFT;
   const int radial = d->type == 1;
@@ -727,124 +720,112 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
       const int rm = top + TS > oheight + margin ? oheight + margin - top : TS;
       const int cm = left + TS > owidth + margin ? owidth + margin - left : TS;
 
-      float vc[2][TS/2][TS/2];
-      for (int r = 0; r < rm/2; r++)
-        for (int c = 0; c < cm/2; c++)
+      for (int color = 0; color < 2; color++)
+      {
+        float vc[TS/2][TS/2] __attribute__((aligned(16)));
+        for (int r = 0; r < rm/2; r++)
+          for (int c = 0; c < cm/2; c++)
+          {
+            int inr = top + 2*r - offv;
+            int inc = left + 2*c - offh;
+            if (inr >= 0 && inr < iheight && inc >= 0 && inc < iwidth)
+              vc[r][c] = in[iwidth*(inr+((color+fb)&1))+inc+!((color+fb+ca)&1)];
+            else
+              vc[r][c] = 0./0.; // nan values will be extrapolated
+          }
+
+        // gamma = 2.0
+        for (int r = 0; r < rm/2; r++)
         {
-          int inr = top + 2*r - offv;
-          int inc = left + 2*c - offh;
-          if (inr >= 0 && inr < iheight && inc >= 0 && inc < iwidth)
-          {
-            vc[0][r][c] = in[iwidth*(inr+0) + inc + !ca];
-            vc[1][r][c] = in[iwidth*(inr+1) + inc + ca];
-          }
-          else
-          {
-            vc[0][r][c] = 0./0.; // nan values will be extrapolated
-            vc[1][r][c] = 0./0.;
-          }
+          int c = 0;
+          float *p0 = &vc[r][c];
+#if __SSE2__
+          for (; c + 3 < cm/2; p0 += 4, c += 4)
+            _mm_store_ps(p0, _mm_sqrt_ps(_mm_load_ps(p0)));
+#endif
+          for (; c < cm/2; p0 += 1, c += 1)
+            *p0 = sqrt(*p0);
         }
 
-      // gamma = 2.0
-      for (int r = 0; r < rm/2; r++)
-      {
-        int c = 0;
-        float *p0 = &vc[0][r][c];
-        float *p1 = &vc[1][r][c];
-#if __SSE2__
-        while (c + 3 < cm/2)
-        {
-          _mm_storeu_ps(p0, _mm_sqrt_ps(_mm_loadu_ps(p0)));
-          _mm_storeu_ps(p1, _mm_sqrt_ps(_mm_loadu_ps(p1)));
-          p0 += 4; p1 += 4; c += 4;
-        }
-#endif
-        while (c < cm/2)
-        {
-          *p0 = sqrt(*p0);
-          *p1 = sqrt(*p1);
-          p0 += 1; p1 += 1; c += 1;
-        }
+        for (int r = margin+((color+fb)&1); r < rm - margin; r += 2)
+          for (int c = margin+!((color+fb+ca)&1); c < cm - margin; c += 2)
+          {
+            const int outr = top + r;
+            const int outc = left + c;
+            const int inr = outr - offv;
+            const int inc = outc - offh;
+
+            double bc[2] = { 0 };
+            const double y = (2.*inr - iheight + 1)/(msize - 1);
+            const double x = (2.*inc - iwidth + 1)/(msize - 1);
+
+            // compute the polynomial
+            if (radial)
+            {
+              const double rad = sqrt(x*x + y*y);
+              if (rad != 0.)
+              {
+                double v = 0.;
+                int ideg = 0;
+                double pnr = rad; // pow_n(rad)
+                for (int n = 1; n <= deg; n++, pnr *= rad)
+                {
+                  v += pnr*fitsol[color][0][ideg];
+                  ideg++;
+                }
+                bc[0] = v*y/rad;
+                bc[1] = v*x/rad;
+              }
+            }
+            else
+            {
+              int ideg = 0;
+              double pmy = 1.; // pow_m(y)
+              for (int m = 0; m <= deg; m++, pmy *= y)
+              {
+                double pnx = 1.; // pow_n(x)
+                for (int n = 0; n <= deg - m; n++, pnx *= x)
+                {
+                  for (int coeff = 0; coeff < ncoeff; coeff++)
+                    bc[coeff] += pmy*pnx*fitsol[color][coeff][ideg];
+                  ideg++;
+                }
+              }
+            }
+
+            const double bv = CLAMPS(bc[0], -sl, sl);
+            const double bh = CLAMPS(bc[1], -sl, sl);
+
+            // shift by interpolation
+            const int xmin = MAX(-inc, -margin);
+            const int ymin = MAX(-inr, -margin);
+            const int xmax = MIN(iwidth-inc, +margin);
+            const int ymax = MIN(iheight-inr, +margin);
+            double v =
+              dt_interpolation_compute_extrapolated_sample(
+                d->ip, &vc[r/2][c/2], bh/2, bv/2,
+                xmin/2, ymin/2, xmax/2-1, ymax/2-1, 1, TS/2);
+            v = fmax(0., v);
+
+            // show shift norms as isos
+            if (visuals)
+            {
+              const double norm = sqrt(bv*bv + bh*bh);
+              for (double l = 0; l <= sl; l += 0.5)
+              {
+                const double d = norm - l;
+                if ((-0.01 < d && d < -0.005) || (0 < d && d < 0.01))
+                {
+                  v *= d >= 0 ? 1.75 : 1.5;
+                  v += d > 0 ? 0.2 : 0.075;
+                }
+              }
+            }
+
+            out[outr*owidth + outc] = v*v; // gamma = 2.0
+          }
       }
 
-      for (int r = margin; r < rm - margin; r++)
-        for (int c = margin+!((r+ca)&1); c < cm - margin; c+=2)
-        {
-          const int outr = top + r;
-          const int outc = left + c;
-          const int inr = outr - offv;
-          const int inc = outc - offh;
-          const int color = (r+fb)&1;
-
-          double bc[2] = { 0 };
-          const double y = 2. * (double)inr/msize - (double)iheight/msize;
-          const double x = 2. * (double)inc/msize - (double)iwidth/msize;
-
-          // compute the polynomial
-          if (radial)
-          {
-            const double rad = sqrt(x*x + y*y);
-            if (rad != 0.)
-            {
-              double v = 0.;
-              int ideg = 0;
-              double pnr = rad; // pow_n(rad)
-              for (int n = 1; n <= deg; n++, pnr *= rad)
-              {
-                v += pnr*fitsol[color][0][ideg];
-                ideg++;
-              }
-              bc[0] = v*y/rad;
-              bc[1] = v*x/rad;
-            }
-          }
-          else
-          {
-            int ideg = 0;
-            double pmy = 1.; // pow_m(y)
-            for (int m = 0; m <= deg; m++, pmy *= y)
-            {
-              double pnx = 1.; // pow_n(x)
-              for (int n = 0; n <= deg - m; n++, pnx *= x)
-              {
-                for (int coeff = 0; coeff < ncoeff; coeff++)
-                  bc[coeff] += pmy*pnx*fitsol[color][coeff][ideg];
-                ideg++;
-              }
-            }
-          }
-
-          const double bv = CLAMPS(bc[0], -sl, sl);
-          const double bh = CLAMPS(bc[1], -sl, sl);
-
-          // shift by interpolation
-          const int xmin = MAX(-inc, -margin);
-          const int ymin = MAX(-inr, -margin);
-          const int xmax = MIN(iwidth-inc, +margin);
-          const int ymax = MIN(iheight-inr, +margin);
-          double v =
-            dt_interpolation_compute_extrapolated_sample(
-              d->ip, &vc[r&1][r/2][c/2], bh/2, bv/2,
-              xmin/2, ymin/2, xmax/2-1, ymax/2-1, 1, TS/2);
-          v = fmax(0., v);
-
-          // show shift norms as isos
-          if (visuals)
-          {
-            const double norm = sqrt(bv*bv + bh*bh);
-            for (double l = 0; l <= sl; l += 0.5)
-            {
-              const double d = norm - l;
-              if ((-0.01 < d && d < -0.005) || (0 < d && d < 0.01))
-              {
-                v *= d >= 0 ? 1.75 : 1.5;
-                v += d > 0 ? 0.2 : 0.075;
-              }
-            }
-          }
-
-          out[outr*owidth + outc] = v*v; // gamma = 2.0
-        }
     }
 
 #if CACORRECT_DEBUG
@@ -884,30 +865,24 @@ void reload_defaults(dt_iop_module_t *module)
   memcpy(module->default_params, &p, sizeof(dt_iop_cacorrect_params_t));
 
   // can't be switched on for non-raw images:
-  if(dt_image_is_raw(&module->dev->image_storage))
-    module->hide_enable_button = 0;
-  else
-    module->hide_enable_button = 1;
-  module->default_enabled = 0;
+  module->hide_enable_button = !dt_image_is_raw(&module->dev->image_storage);
 }
 
 void init(dt_iop_module_t *module)
 {
+  module->params_size = sizeof(dt_iop_cacorrect_params_t);
   module->params = malloc(sizeof(dt_iop_cacorrect_params_t));
   module->default_params = malloc(sizeof(dt_iop_cacorrect_params_t));
-  module->gui_data = NULL;
   // our module is disabled by default
   module->default_enabled = 0;
 
   // we come just before demosaicing.
   module->priority = 70; // module order created by iop_dependencies.py, do not edit!
-  module->params_size = sizeof(dt_iop_cacorrect_params_t);
 }
 
 void cleanup(dt_iop_module_t *module)
 {
   free(module->params);
-  module->params = NULL;
 }
 
 void commit_params(dt_iop_module_t *self, dt_iop_cacorrect_params_t *p,
@@ -917,7 +892,8 @@ void commit_params(dt_iop_module_t *self, dt_iop_cacorrect_params_t *p,
   d->type = p->type;
   d->ip = dt_interpolation_new(DT_INTERPOLATION_USERPREF);
   d->fitdata = NULL;
-  if (p->type == 1) {
+  if (p->type == 1)
+  {
     int rdegree = get_radial_degree();
     if (rdegree <= 0) rdegree = 1; // default value
     d->degree = rdegree; // order of the radial polynomial fit
@@ -938,7 +914,6 @@ void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
                dt_dev_pixelpipe_iop_t *piece)
 {
   piece->data = malloc(sizeof(dt_iop_cacorrect_data_t));
-  self->commit_params(self, self->default_params, pipe, piece);
 }
 
 void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
@@ -947,7 +922,6 @@ void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
   dt_iop_cacorrect_data_t *d = piece->data;
   if (d->fitdata)
     free(d->fitdata);
-  d->fitdata = NULL;
   free(piece->data);
 }
 
@@ -988,7 +962,6 @@ void gui_init(dt_iop_module_t *self)
 void gui_cleanup(dt_iop_module_t *self)
 {
   free(self->gui_data);
-  self->gui_data = NULL;
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
