@@ -779,7 +779,7 @@ dt_extrapolate_boundaries_sample(
   const int samplestride,
   const int linestride)
 {
-  if (!isnan(in[y*linestride + x*samplestride])) return;
+  if (!isnan(in[linestride*y + samplestride*x])) return;
   int d = MAX(MAX(xmin - x, x - xmax), MAX(ymin - y, y - ymax));
   if (d <= 0) return;
   double r = 1.5*d + 0.5;
@@ -793,12 +793,12 @@ dt_extrapolate_boundaries_sample(
       double k = 1 - d2/(r*r);
       if (k > 0)
       {
-        sum += k * in[j*linestride + i*samplestride];
+        sum += k * in[linestride*j + samplestride*i];
         norm += k;
       }
     }
   if (norm > 0)
-    in[y*linestride + x*samplestride] = sum/norm;
+    in[linestride*y + samplestride*x] = sum/norm;
 }
 
 float
@@ -839,7 +839,7 @@ dt_interpolation_compute_extrapolated_sample(
   // Prepare t vector to compute four values a loop
   float kernelx[16] __attribute__((aligned(SSE_ALIGNMENT)));
   float kernely[16] __attribute__((aligned(SSE_ALIGNMENT)));
-  static const __m128 bootstrap = {  0.f, -1.f, -2.f, -3.f};
+  static const __m128 bootstrap = {  0.f, -1.f, -2.f, -3.f };
   __m128 vw = _mm_set_ps1((float)w);
   __m128 vtx = _mm_add_ps(_mm_set_ps1(fx), bootstrap);
   __m128 vty = _mm_add_ps(_mm_set_ps1(fy), bootstrap);

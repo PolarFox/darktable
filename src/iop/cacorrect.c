@@ -28,7 +28,7 @@
 #include <gtk/gtk.h>
 #include <stdlib.h>
 
-#define CACORRECT_DEBUG 0
+#define CACORRECT_DEBUG 1
 
 #define CA_SHIFT 8 // max allowed CA shift, must be even
 
@@ -283,11 +283,11 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
 
   const int iwidth  = roi_in->width;
   const int iheight = roi_in->height;
-  const int msize = MIN(iwidth, iheight);
+  const int isize = MIN(iwidth, iheight);
   const int owidth  = roi_out->width;
   const int oheight = roi_out->height;
-  const int offv = roi_in->y - roi_out->y;
-  const int offh = roi_in->x - roi_out->x;
+  const int offv = roi_out->y - roi_in->y;
+  const int offh = roi_out->x - roi_in->x;
 
   const uint32_t filters = dt_image_flipped_filter(&piece->pipe->image);
   const int ca = (filters & 3) != 1, fb = (filters >> (!ca << 2) & 3) == 2;
@@ -295,7 +295,7 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
   const int sl = CA_SHIFT;
   const int radial = d->type == 1;
   const int deg = d->degree;
-  const int degnum = radial ? deg : ((deg + 1) * (deg + 2)) / 2;
+  const int degnum = radial ? deg : ((deg+1)*(deg+2))/2;
 
   const int srad = 22; // size of samples, must be even
   const int subs = srad; // spacing between samples, must be even
@@ -349,7 +349,7 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
         int c = 0;
         const int inr = top + r;
         const int inc = left + c;
-        const float *pi = in + iwidth*inr + inc;
+        const float *pi = in + (size_t)iwidth*inr + inc;
         float *po = &rgb[r][c];
 #if __SSE2__
         for (; c + 3 < cm; pi += 4, po += 4, c += 4)
@@ -397,8 +397,8 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
               inc < border || inc > iwidth - 1 - border)
             continue;
 
-          const double y = (2.*inr - iheight + 1)/(msize - 1);
-          const double x = (2.*inc - iwidth + 1)/(msize - 1);
+          const double y = (2.*inr - iheight + 1)/(isize - 1);
+          const double x = (2.*inc - iwidth + 1)/(isize - 1);
 
           // compute variation map
           float t[2][2*sl+1][2*sl+1];
@@ -511,9 +511,9 @@ CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
           if (visuals)
           {
             const int rad = 6;
-            const int outr = inr + offv;
-            const int outc = inc + offh + !((outr+ca)&1);
-            float *outp = out + owidth*outr + outc;
+            const int outr = inr - offv;
+            const int outc = inc - offh + !((outr+ca)&1);
+            float *outp = out + (size_t)owidth*outr + outc;
             if (outr >= rad && outr < oheight - rad &&
                 outc >= rad && outc < owidth - rad)
             {
@@ -667,11 +667,11 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
 
   const int iwidth  = roi_in->width;
   const int iheight = roi_in->height;
-  const int msize = MIN(iwidth, iheight);
+  const int isize = MIN(iwidth, iheight);
   const int owidth  = roi_out->width;
   const int oheight = roi_out->height;
-  const int offv = roi_in->y - roi_out->y;
-  const int offh = roi_in->x - roi_out->x;
+  const int offv = roi_out->y - roi_in->y;
+  const int offh = roi_out->x - roi_in->x;
 
 #if CACORRECT_DEBUG
   printf("cacorrect: i.w=%d i.h=%d i.x=%d i.y=%d s=%f\n",
@@ -686,7 +686,7 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
   const int sl = CA_SHIFT;
   const int radial = d->type == 1;
   const int deg = d->degree;
-  const int degnum = radial ? deg : ((deg + 1) * (deg + 2)) / 2;
+  const int degnum = radial ? deg : ((deg+1)*(deg+2))/2;
 
   const int TS = (iwidth > 2024 && iheight > 2024) ? 256 : 128;
   const int ncoeff = radial ? 1 : 2;
@@ -726,10 +726,10 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
         for (int r = 0; r < rm/2; r++)
           for (int c = 0; c < cm/2; c++)
           {
-            int inr = top + 2*r - offv;
-            int inc = left + 2*c - offh;
+            int inr = top + 2*r + offv + ((color+fb)&1);
+            int inc = left + 2*c + offh + !((color+fb+ca)&1);
             if (inr >= 0 && inr < iheight && inc >= 0 && inc < iwidth)
-              vc[r][c] = in[iwidth*(inr+((color+fb)&1))+inc+!((color+fb+ca)&1)];
+              vc[r][c] = in[(size_t)iwidth*inr+inc];
             else
               vc[r][c] = 0./0.; // nan values will be extrapolated
           }
@@ -752,12 +752,12 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
           {
             const int outr = top + r;
             const int outc = left + c;
-            const int inr = outr - offv;
-            const int inc = outc - offh;
+            const int inr = outr + offv;
+            const int inc = outc + offh;
 
-            double bc[2] = { 0 };
-            const double y = (2.*inr - iheight + 1)/(msize - 1);
-            const double x = (2.*inc - iwidth + 1)/(msize - 1);
+            double bc[2] = { };
+            const double y = (2.*inr - iheight + 1)/(isize - 1);
+            const double x = (2.*inc - iwidth + 1)/(isize - 1);
 
             // compute the polynomial
             if (radial)
@@ -822,7 +822,7 @@ CA_correct(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
               }
             }
 
-            out[outr*owidth + outc] = v*v; // gamma = 2.0
+            out[(size_t)owidth*outr + outc] = v*v; // gamma = 2.0
           }
       }
 
@@ -840,11 +840,14 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
              const float *const in, float *const out,
              const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
 {
-  const int offv = roi_in->y - roi_out->y;
-  const int offh = roi_in->x - roi_out->x;
-  for (int r = 0; r < roi_out->height; r++)
-    for (int c = 0; c < roi_out->width; c++)
-      out[roi_out->width*r+c] = in[roi_in->width*(r-offv)+(c-offh)];
+  const int iwidth  = roi_in->width;
+  const int owidth  = roi_out->width;
+  const int oheight = roi_out->height;
+  const int offv = roi_out->y - roi_in->y;
+  const int offh = roi_out->x - roi_in->x;
+  for (int r = 0; r < oheight; r++)
+    memcpy(out + (size_t)owidth*r, in + (size_t)iwidth*(r+offv)+offh,
+           sizeof(float)*owidth);
 
   if (piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT && !get_displayed())
     if (!dt_control_get_dev_zoom()) return;
