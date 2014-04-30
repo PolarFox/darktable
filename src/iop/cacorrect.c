@@ -28,7 +28,7 @@
 #include <gtk/gtk.h>
 #include <stdlib.h>
 
-#define CACORRECT_DEBUG 1
+#define CACORRECT_DEBUG 0
 
 #define CA_SHIFT 8 // max allowed CA shift, must be even
 
@@ -78,11 +78,6 @@ groups ()
 int flags ()
 {
   return IOP_FLAGS_ONE_INSTANCE;
-}
-
-static int get_legacy()
-{
-  return dt_conf_get_int("plugins/darkroom/cacorrect/legacy");
 }
 
 static int get_degree()
@@ -158,34 +153,6 @@ void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   }
 }
 
-/*==============================================================================
- * begin raw therapee code, hg checkout of june 05, 2013 branch master.
- *============================================================================*/
-
-////////////////////////////////////////////////////////////////
-//
-//		Chromatic Aberration Auto-correction
-//
-//		copyright (c) 2008-2010  Emil Martinec <ejmartin@uchicago.edu>
-//
-//
-// code dated: November 26, 2010
-//
-//	CA_correct_RT.cc is free software: you can redistribute it and/or modify
-//	it under the terms of the GNU General Public License as published by
-//	the Free Software Foundation, either version 3 of the License, or
-//	(at your option) any later version.
-//
-//	This program is distributed in the hope that it will be useful,
-//	but WITHOUT ANY WARRANTY; without even the implied warranty of
-//	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//	GNU General Public License for more details.
-//
-//	You should have received a copy of the GNU General Public License
-//	along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
-////////////////////////////////////////////////////////////////
-//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 static int
 LinEqSolve(int nDim, double* pfMatr, double* pfVect, double* pfSolution)
 {
@@ -266,13 +233,7 @@ LinEqSolve(int nDim, double* pfMatr, double* pfVect, double* pfSolution)
   return 0;
 }
 //end of linear equation solver
-//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-#include "caold.c"
-
-/*==============================================================================
- * end raw therapee code
- *============================================================================*/
 
 static void
 CA_analyse(dt_iop_module_t *const self, dt_dev_pixelpipe_iop_t *const piece,
@@ -852,11 +813,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   if (piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT && !get_displayed())
     if (!dt_control_get_dev_zoom()) return;
 
-  int legacy = get_legacy();
-  if (legacy == 0)
-    CA_correct(self, piece, in, out, roi_in, roi_out);
-  else if (legacy == 1)
-    CA_correct_old(self, piece, in, out, roi_in, roi_out);
+  CA_correct(self, piece, in, out, roi_in, roi_out);
 }
 
 void reload_defaults(dt_iop_module_t *module)
