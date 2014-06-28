@@ -851,6 +851,8 @@ void commit_params(dt_iop_module_t *self, dt_iop_cacorrect_params_t *p,
   dt_iop_cacorrect_data_t *d = piece->data;
   d->type = p->type;
   d->ip = dt_interpolation_new(DT_INTERPOLATION_USERPREF);
+  if (d->fitdata)
+    free(d->fitdata);
   d->fitdata = NULL;
   if (p->type == 1)
   {
@@ -874,6 +876,8 @@ void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
                dt_dev_pixelpipe_iop_t *piece)
 {
   piece->data = malloc(sizeof(dt_iop_cacorrect_data_t));
+  dt_iop_cacorrect_data_t *d = piece->data;
+  d->fitdata = NULL;
 }
 
 void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
