@@ -156,18 +156,14 @@ void dt_dev_cleanup(dt_develop_t *dev)
 void dt_dev_process_image(dt_develop_t *dev)
 {
   if(!dev->gui_attached || dev->pipe->processing) return;
-  dt_job_t job;
-  dt_dev_process_image_job_init(&job, dev);
-  int err = dt_control_add_job_res(darktable.control, &job, DT_CTL_WORKER_2);
+  int err = dt_control_add_job_res(darktable.control, dt_dev_process_image_job_create(dev), DT_CTL_WORKER_ZOOM_1);
   if(err) fprintf(stderr, "[dev_process_image] job queue exceeded!\n");
 }
 
 void dt_dev_process_preview(dt_develop_t *dev)
 {
   if(!dev->gui_attached) return;
-  dt_job_t job;
-  dt_dev_process_preview_job_init(&job, dev);
-  int err = dt_control_add_job_res(darktable.control, &job, DT_CTL_WORKER_3);
+  int err = dt_control_add_job_res(darktable.control, dt_dev_process_preview_job_create(dev), DT_CTL_WORKER_ZOOM_FILL);
   if(err) fprintf(stderr, "[dev_process_preview] job queue exceeded!\n");
 }
 
@@ -196,7 +192,9 @@ void dt_dev_process_preview_job(dt_develop_t *dev)
   dt_pthread_mutex_lock(&dev->preview_pipe_mutex);
   dt_control_log_busy_enter();
   dev->preview_pipe->input_timestamp = dev->timestamp;
-  dev->preview_dirty = 1;
+  // we have to set this to 0 in the beginning and 1 when bailing out early since we check this without caring about the mutex in some places.
+  // adding locking everywhere would block the gui and make putting this into its own thread pointless. i guess.
+  dev->preview_dirty = 0;
 
   // lock if there, issue a background load, if not (best-effort for mip f).
   dt_mipmap_cache_read_get(darktable.mipmap_cache, &buf, dev->image_storage.id, DT_MIPMAP_F, 0);
@@ -204,6 +202,7 @@ void dt_dev_process_preview_job(dt_develop_t *dev)
   {
     dt_control_log_busy_leave();
     dt_pthread_mutex_unlock(&dev->preview_pipe_mutex);
+    dev->preview_dirty = 1;
     return; // not loaded yet. load will issue a gtk redraw on completion, which in turn will trigger us again later.
   }
   // init pixel pipeline for preview.
@@ -231,6 +230,7 @@ restart:
     dt_control_log_busy_leave();
     dt_pthread_mutex_unlock(&dev->preview_pipe_mutex);
     dt_mipmap_cache_read_release(darktable.mipmap_cache, &buf);
+    dev->preview_dirty = 1;
     return;
   }
   // adjust pipeline according to changed flag set by {add,pop}_history_item.
@@ -245,6 +245,7 @@ restart:
       dt_control_log_busy_leave();
       dt_pthread_mutex_unlock(&dev->preview_pipe_mutex);
       dt_mipmap_cache_read_release(darktable.mipmap_cache, &buf);
+      dev->preview_dirty = 1;
       return;
     }
     else goto restart;
@@ -252,7 +253,6 @@ restart:
   dt_show_times(&start, "[dev_process_preview] pixel pipeline processing", NULL);
   dt_dev_average_delay_update(&start, &dev->preview_average_delay);
 
-  dev->preview_dirty = 0;
   // redraw the whole thing, to also update color picker values and histograms etc.
   if(dev->gui_attached)
     dt_control_queue_redraw();
@@ -467,7 +467,7 @@ int dt_dev_write_history_item(const dt_image_t *image, dt_dev_history_item_t *h,
   // printf("[dev write history item] writing %d - %s params %f %f\n", h->module->instance, h->module->op, *(float *)h->params, *(((float *)h->params)+1));
   sqlite3_finalize (stmt);
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "update history set operation = ?1, op_params = ?2, module = ?3, enabled = ?4, blendop_params = ?7, blendop_version = ?8, multi_priority = ?9, multi_name = ?10 where imgid = ?5 and num = ?6", -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, h->module->op, strlen(h->module->op), SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, h->module->op, -1, SQLITE_TRANSIENT);
   DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 2, h->params, h->module->params_size, SQLITE_TRANSIENT);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 3, h->module->version());
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 4, h->enabled);
@@ -476,7 +476,7 @@ int dt_dev_write_history_item(const dt_image_t *image, dt_dev_history_item_t *h,
   DT_DEBUG_SQLITE3_BIND_BLOB(stmt, 7, h->blend_params, sizeof(dt_develop_blend_params_t), SQLITE_TRANSIENT);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 8, dt_develop_blend_version());
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 9, h->multi_priority);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 10, h->multi_name, strlen(h->multi_name), SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 10, h->multi_name, -1, SQLITE_TRANSIENT);
 
   sqlite3_step (stmt);
   sqlite3_finalize (stmt);
@@ -793,9 +793,9 @@ auto_apply_presets(dt_develop_t *dev)
   sqlite3_stmt *stmt;
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, cimg->exif_model, strlen(cimg->exif_model), SQLITE_TRANSIENT);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, cimg->exif_maker, strlen(cimg->exif_maker), SQLITE_TRANSIENT);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 4, cimg->exif_lens,  strlen(cimg->exif_lens),  SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, cimg->exif_model, -1, SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, cimg->exif_maker, -1, SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 4, cimg->exif_lens,  -1,  SQLITE_TRANSIENT);
   DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 5, fmaxf(0.0f, fminf(1000000, cimg->exif_iso)));
   DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 6, fmaxf(0.0f, fminf(1000000, cimg->exif_exposure)));
   DT_DEBUG_SQLITE3_BIND_DOUBLE(stmt, 7, fmaxf(0.0f, fminf(1000000, cimg->exif_aperture)));

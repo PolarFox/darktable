@@ -5,11 +5,11 @@
 		]>
 <sect3 status="final" id="denoise_profiled">
 
-  <title>Denoise &ndash; profiled</title>
+  <title>Denoise&nbsp;&ndash; profiled</title>
 
   <indexterm>
     <primary>modules</primary>
-    <secondary>denoise &ndash; profiled</secondary>
+    <secondary>denoise&nbsp;&ndash; profiled</secondary>
   </indexterm>
 
   <indexterm>
@@ -33,10 +33,10 @@
         <tbody>
           <row>
             <entry>
-              This module offers an easy to use and &ndash; at the same time &ndash; highly efficient
-              denoise operation. Under the hood it applies (your choice of) a non-local means or
-              edge-aware wavelet denoise algorithm with parameters specifically profiled for
-              certain camera models and ISO settings.
+              This module offers an easy to use and&nbsp;&ndash; at the same time&nbsp;&ndash;
+              highly efficient denoise operation. Under the hood it applies (your choice of) a
+              non-local means or edge-aware wavelet denoise algorithm with parameters
+              specifically profiled for certain camera models and ISO settings.
             </entry>
             <entry>
               <graphic fileref="darkroom/modules/images/denoise_profiled.png" scalefit="1" width="80%" align="center" />

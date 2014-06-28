@@ -47,7 +47,6 @@ RawImage RafDecoder::decodeRawInternal() {
   uint32 width = 0;
 
   alt_layout = hints.find("set_alt_layout") == hints.end();
-  fuji_width = hints.find("set_fuji_width") == hints.end();
 
   if (raw->hasEntry(FUJI_RAWIMAGEFULLHEIGHT)) {
     height = raw->getEntry(FUJI_RAWIMAGEFULLHEIGHT)->getInt();
@@ -108,6 +107,8 @@ RawImage RafDecoder::decodeRawInternal() {
   int bps = 16;
   if (raw->hasEntry(FUJI_BITSPERSAMPLE))    
     bps = raw->getEntry(FUJI_BITSPERSAMPLE)->getInt();
+  // x-trans sensors report 14bpp, but data isn't packed so read as 16bpp
+  if (bps == 14) bps = 16;
 
   if (offsets->count != 1)
     ThrowRDE("RAF Decoder: Multiple Strips found: %u", offsets->count);

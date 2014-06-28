@@ -876,11 +876,7 @@ dt_mipmap_cache_read_get(
   {
     // and opposite: prefetch without locking
     if(mip > DT_MIPMAP_FULL || (int)mip < DT_MIPMAP_0) return; // remove the (int) once we no longer have to support gcc < 4.8 :/
-    dt_job_t j;
-    dt_image_load_job_init(&j, imgid, mip);
-    // if the job already exists, make it high-priority, if not, add it:
-    if(dt_control_revive_job(darktable.control, &j) < 0)
-      dt_control_add_job(darktable.control, &j);
+    dt_control_add_job(darktable.control, DT_JOB_QUEUE_SYSTEM_FG, dt_image_load_job_create(imgid, mip));
   }
   else if(flags == DT_MIPMAP_BLOCKING)
   {
@@ -1136,7 +1132,7 @@ _init_f(
   char filename[2048] = {0};
   gboolean from_cache = TRUE;
   dt_image_full_path(imgid, filename, sizeof(filename), &from_cache);
-  if (strlen(filename) == 0 || !g_file_test(filename, G_FILE_TEST_EXISTS))
+  if ( !*filename || !g_file_test(filename, G_FILE_TEST_EXISTS))
   {
     *width = *height = 0;
     return;
@@ -1246,7 +1242,7 @@ _init_8(
 
   /* do not even try to process file if it isnt available */
   dt_image_full_path(imgid, filename, sizeof(filename), &from_cache);
-  if (strlen(filename) == 0 || !g_file_test(filename, G_FILE_TEST_EXISTS))
+  if ( !*filename || !g_file_test(filename, G_FILE_TEST_EXISTS))
   {
     *width = *height = 0;
     return;

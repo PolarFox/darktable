@@ -741,8 +741,7 @@ static const gchar *picasa_upload_photo_to_album(PicasaContext *ctx, gchar *albu
 
       xmlFree( updateUri );
       xmlFree( writebuffer.data );
-      if (response.data != NULL)
-        g_free(response.data);
+      g_free(response.data);
 
       curl_slist_free_all( headers );
     }
@@ -791,7 +790,7 @@ static gboolean combobox_separator(GtkTreeModel *model,GtkTreeIter *iter,gpointe
   gchar *v=NULL;
   if (G_VALUE_HOLDS_STRING (&value))
   {
-    if( (v=(gchar *)g_value_get_string (&value))!=NULL && strlen(v) == 0 ) return TRUE;
+    if( (v=(gchar *)g_value_get_string (&value))!=NULL && *v == '\0' ) return TRUE;
   }
   return FALSE;
 }
@@ -1459,7 +1458,7 @@ int store(dt_imageio_module_storage_t *self, struct dt_imageio_module_data_t *sd
     goto cleanup;
   }
 
-  if (strlen(ctx->album_id) == 0)
+  if (!*(ctx->album_id))
   {
     if (ctx->album_title == NULL)
     {
@@ -1521,6 +1520,7 @@ void init(dt_imageio_module_storage_t *self)
 void *get_params(struct dt_imageio_module_storage_t *self)
 {
   dt_storage_picasa_gui_data_t *ui = (dt_storage_picasa_gui_data_t*)self->gui_data;
+  if(!ui) return NULL; // gui not initialized, CLI mode
   if(ui->picasa_api == NULL || ui->picasa_api->token == NULL)
   {
     return NULL;

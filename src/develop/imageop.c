@@ -295,8 +295,8 @@ dt_iop_load_module_by_so(dt_iop_module_t *module, dt_iop_module_so_t *so, dt_dev
   module->request_histogram_source = DT_DEV_PIXELPIPE_PREVIEW;
   module->histogram_params.roi = NULL;
   module->histogram_params.bins_count = 64;
-  module->histogram_bins_count = 0;
-  module->histogram_pixels = 0;
+  module->histogram_stats.bins_count = 0;
+  module->histogram_stats.pixels = 0;
   module->multi_priority = 0;
   for(int k=0; k<3; k++)
   {
@@ -920,6 +920,16 @@ void dt_iop_reload_defaults(dt_iop_module_t *module)
     _iop_gui_update_header(module);
 }
 
+void dt_iop_cleanup_histogram(gpointer data, gpointer user_data)
+{
+  dt_iop_module_t *module = (dt_iop_module_t *)data;
+
+  free(module->histogram);
+  module->histogram = NULL;
+  module->histogram_stats.bins_count = 0;
+  module->histogram_stats.pixels = 0;
+}
+
 static void
 init_presets(dt_iop_module_so_t *module_so)
 {
@@ -932,7 +942,7 @@ init_presets(dt_iop_module_so_t *module_so)
 
   sqlite3_stmt *stmt;
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select name, op_version, op_params, blendop_version, blendop_params from presets where operation = ?1", -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module_so->op, strlen(module_so->op), SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module_so->op, -1, SQLITE_TRANSIENT);
 
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
@@ -952,7 +962,7 @@ init_presets(dt_iop_module_so_t *module_so)
 
       sqlite3_stmt *stmt2;
       DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select module from history where operation = ?1 and op_params = ?2", -1, &stmt2, NULL);
-      DT_DEBUG_SQLITE3_BIND_TEXT( stmt2, 1, module_so->op, strlen(module_so->op), SQLITE_TRANSIENT );
+      DT_DEBUG_SQLITE3_BIND_TEXT( stmt2, 1, module_so->op, -1, SQLITE_TRANSIENT );
       DT_DEBUG_SQLITE3_BIND_BLOB( stmt2, 2, old_params, old_params_size, SQLITE_TRANSIENT );
 
       if( sqlite3_step(stmt2) == SQLITE_ROW)
@@ -974,8 +984,8 @@ init_presets(dt_iop_module_so_t *module_so)
 
       DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "update presets set op_version=?1 where operation=?2 and name=?3", -1, &stmt2, NULL);
       DT_DEBUG_SQLITE3_BIND_INT( stmt2, 1, old_params_version );
-      DT_DEBUG_SQLITE3_BIND_TEXT( stmt2, 2, module_so->op, strlen(module_so->op), SQLITE_TRANSIENT );
-      DT_DEBUG_SQLITE3_BIND_TEXT( stmt2, 3, name, strlen(name), SQLITE_TRANSIENT );
+      DT_DEBUG_SQLITE3_BIND_TEXT( stmt2, 2, module_so->op, -1, SQLITE_TRANSIENT );
+      DT_DEBUG_SQLITE3_BIND_TEXT( stmt2, 3, name, -1, SQLITE_TRANSIENT );
 
       sqlite3_step(stmt2);
       sqlite3_finalize(stmt2);
@@ -1025,8 +1035,8 @@ init_presets(dt_iop_module_so_t *module_so)
                                   "where operation=?3 and name=?4", -1, &stmt2, NULL);
       DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, module->version());
       DT_DEBUG_SQLITE3_BIND_BLOB(stmt2, 2, new_params, new_params_size, SQLITE_TRANSIENT);
-      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 3, module->op, strlen(module_so->op), SQLITE_TRANSIENT);
-      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 4, name, strlen(name), SQLITE_TRANSIENT);
+      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 3, module->op, -1, SQLITE_TRANSIENT);
+      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 4, name, -1, SQLITE_TRANSIENT);
 
       sqlite3_step(stmt2);
       sqlite3_finalize(stmt2);
@@ -1078,8 +1088,8 @@ init_presets(dt_iop_module_so_t *module_so)
                                   "where operation=?3 and name=?4", -1, &stmt2, NULL);
       DT_DEBUG_SQLITE3_BIND_INT(stmt2, 1, dt_develop_blend_version() );
       DT_DEBUG_SQLITE3_BIND_BLOB(stmt2, 2, new_blend_params, sizeof(dt_develop_blend_params_t), SQLITE_TRANSIENT);
-      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 3, module->op, strlen(module_so->op), SQLITE_TRANSIENT);
-      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 4, name, strlen(name), SQLITE_TRANSIENT);
+      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 3, module->op, -1, SQLITE_TRANSIENT);
+      DT_DEBUG_SQLITE3_BIND_TEXT(stmt2, 4, name, -1, SQLITE_TRANSIENT);
 
       sqlite3_step(stmt2);
       sqlite3_finalize(stmt2);
@@ -1100,7 +1110,7 @@ static void init_key_accels(dt_iop_module_so_t *module)
   /** load shortcuts for presets **/
   sqlite3_stmt *stmt;
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select name from presets where operation=?1 order by writeprotect desc, rowid", -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, strlen(module->op), SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, -1, SQLITE_TRANSIENT);
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
     char path[1024];
@@ -1216,26 +1226,14 @@ void dt_iop_cleanup_module(dt_iop_module_t *module)
 {
   module->cleanup(module);
 
-  if (module->default_params != NULL)
-  {
-    free(module->default_params);
-    module->default_params = NULL;
-  }
-  if (module->blend_params != NULL)
-  {
-    free(module->blend_params);
-    module->blend_params = NULL;
-  }
-  if (module->default_blendop_params != NULL)
-  {
-    free(module->default_blendop_params);
-    module->default_blendop_params = NULL;
-  }
-  if (module->histogram != NULL)
-  {
-    free(module->histogram);
-    module->histogram = NULL;
-  }
+  free(module->default_params);
+  module->default_params = NULL;
+  free(module->blend_params);
+  module->blend_params = NULL;
+  free(module->default_blendop_params);
+  module->default_blendop_params = NULL;
+  free(module->histogram);
+  module->histogram = NULL;
 }
 
 void dt_iop_unload_modules_so()
@@ -2469,7 +2467,7 @@ void dt_iop_connect_common_accels(dt_iop_module_t *module)
   sqlite3_stmt *stmt;
   // don't know for which image. show all we got:
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select name from presets where operation=?1 order by writeprotect desc, rowid", -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, strlen(module->op), SQLITE_TRANSIENT);
+  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, -1, SQLITE_TRANSIENT);
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
     dt_accel_connect_preset_iop(module,(char *)sqlite3_column_text(stmt, 0));

@@ -254,7 +254,7 @@ void expose(dt_view_t *self, cairo_t *cri, int32_t width_i, int32_t height_i, in
   }
 
   /* check if we should create a snapshot of view */
-  if(darktable.develop->proxy.snapshot.request)
+  if(darktable.develop->proxy.snapshot.request && !darktable.develop->image_loading)
   {
     /* reset the request */
     darktable.develop->proxy.snapshot.request = FALSE;
@@ -699,6 +699,9 @@ dt_dev_change_image(dt_develop_t *dev, const uint32_t imgid)
   /* last set the group to update visibility of iop modules for new pipe */
   dt_dev_modulegroups_set(dev,dt_conf_get_int("plugins/darkroom/groups"));
 
+  /* cleanup histograms */
+  g_list_foreach(dev->iop, (GFunc)dt_iop_cleanup_histogram, (gpointer)NULL);
+
   // make signals work again, but only after focus event,
   // to avoid crop/rotate for example to add another history item.
   darktable.gui->reset = 0;
@@ -923,7 +926,7 @@ static void _darkroom_ui_apply_style_popupmenu(GtkWidget *w, gpointer user_data)
       char* items_string = dt_styles_get_item_list_as_string(style->name);
       gchar* tooltip = NULL;
 
-      if((style->description) && strlen(style->description))
+      if(style->description && *style->description)
       {
         tooltip = g_strconcat("<b>", style->description, "</b>\n", items_string, NULL);
       }

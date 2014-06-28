@@ -1,32 +1,31 @@
-doc = require "core"
 real_darktable = require "darktable"
 require "darktable.debug"
-darktable = doc.toplevel.darktable
-types = doc.toplevel.types
-events = doc.toplevel.events
-attributes = doc.toplevel.attributes
 local tmp_node
 
-
-for _,v in pairs({"node_to_string","para","startlist","listel","endlist","code"})   do -- add p a way to have code sections
+---------------------
+-- check for generator functions
+---------------------
+for _,v in pairs({"node_to_string","para","startlist","listel","endlist","code","emphasis"})   do
 	if _ENV[v]== nil then
 		error("function '"..v.."' not defined when requiring content")
 	end
 end
-----------------------
---  EARLY TWEAKING  --
-----------------------
-for k, v in pairs(real_darktable.modules.format) do
-	local res = v()
-	doc.document_type_from_obj(res,types[real_darktable.debug.type(res)])
+---------------------
+-- check for database content
+---------------------
+if  #real_darktable.database == 0 then
+	error("The database needs to contain at least one image to generate documentation")
+end
+if  #real_darktable.styles == 0 then
+	error("The database needs to contain at least one style to generate documentation")
 end
 
-for k, v in pairs(real_darktable.modules.storage) do
-	local res = v()
-	if res then
-		doc.document_type_from_obj(res,types[real_darktable.debug.type(res)])
-	end
-end
+
+doc = require "core"
+darktable = doc.toplevel.darktable
+types = doc.toplevel.types
+events = doc.toplevel.events
+attributes = doc.toplevel.attributes
 
 
 local function my_tostring(obj)
@@ -255,6 +254,15 @@ darktable.styles.apply:add_parameter("style",my_tostring(types.dt_style_t),[[The
 darktable.styles.apply:add_parameter("image",my_tostring(types.dt_lua_image_t),[[The image to apply the style to.]])
 darktable.styles.apply:set_main_parent(darktable.styles)
 
+darktable.styles.import:set_text([[Import a style from an external .dtstyle file]]):add_version_info("function_added")
+darktable.styles.import:add_parameter("filename","string","The file to import");
+darktable.styles.import:set_main_parent(darktable.styles)
+
+darktable.styles.export:set_text([[Export a style to an external .dtstyle file]]):add_version_info("function_added")
+darktable.styles.export:add_parameter("style",my_tostring(types.dt_style_t),"The file to import");
+darktable.styles.export:add_parameter("directory","string","The directory to export to");
+darktable.styles.export:add_parameter("overwrite","boolean","Is overwriting an existing file allowed"):set_attribute("optional")
+darktable.styles.export:set_main_parent(darktable.styles)
 -------------------------
 --  DARKTABLE.DATABASE --
 -------------------------
@@ -284,6 +292,7 @@ darktable.database.move_image:set_text([[Physically moves an image (and all its 
 darktable.database.move_image:add_version_info("function added")
 darktable.database.move_image:add_parameter("image",tostring(types.dt_lua_image_t),[[The image to move]])
 darktable.database.move_image:add_parameter("film",tostring(types.dt_lua_film_t),[[The film to move to]])
+darktable.database.move_image:set_main_parent(darktable.database)
 darktable.database.copy_image:set_text([[Physically copies an image to another film.]]..para()..
 [[This will copy the image file and the related XMP to the directory of the new film]]..para()..
 [[If there is already a file with the same name as the image file, it wil create a duplicate from that file instead]]..para()..
@@ -292,6 +301,7 @@ darktable.database.copy_image:add_version_info("function added")
 darktable.database.copy_image:add_parameter("image",tostring(types.dt_lua_image_t),[[The image to copy]])
 darktable.database.copy_image:add_parameter("film",tostring(types.dt_lua_film_t),[[The film to copy to]])
 darktable.database.copy_image:add_return(tostring(types.dt_lua_image_t),[[The new image]])
+darktable.database.copy_image:set_main_parent(darktable.database)
 
 ------------------------
 --  DARKTABLE.MODULES --
@@ -325,6 +335,9 @@ darktable.modules.storage.email:set_alias(darktable.modules.storage.flickr)
 darktable.modules.storage.email:set_alias(darktable.modules.storage.facebook)
 darktable.modules.storage.email:set_alias(darktable.modules.storage.picasa)
 
+for k, v in darktable.modules.view:unskiped_children() do
+	v:set_main_parent(darktable.modules.view)
+end
 darktable.modules.view:set_text([[The different views in darktable]])
 darktable.modules.view:add_version_info([[View objects added]])
 darktable.modules.view.map:set_text([[The map view]])
@@ -368,6 +381,20 @@ tmp:set_attribute("optional",true)
 tmp:add_parameter("job",my_tostring(types.dt_lua_backgroundjob_t),[[The job who is being cancelded]])
 darktable.modules.lib.backgroundjobs.create_job:add_return(my_tostring(types.dt_lua_backgroundjob_t),[[The newly created job object]])
 
+darktable.modules.lib.snapshots:set_text([[The UI element that manipulates snapshots in darkroom]])
+darktable.modules.lib.snapshots.ratio:set_text([[The place in the screen where the line separating the snapshot is. Between 0 and 1]])
+darktable.modules.lib.snapshots.direction:set_text([[The direction of the snapshot overlay, can be one of:]]..startlist()..
+listel("top")..
+listel("bottom")..
+listel("left")..
+listel("right")..
+endlist())
+
+darktable.modules.lib.snapshots["#"]:set_text([[The different snapshots for the image]])
+darktable.modules.lib.snapshots.selected:set_text([[The currently selected snapshot]])
+darktable.modules.lib.snapshots.take_snapshot:set_text([[Take a snapshot of the current image and add it to the UI]]..para()..[[The snapshot file will be generated at the next redraw of the main window]])
+darktable.modules.lib.snapshots.max_snapshot:set_text([[The maximum number of snapshots]])
+
 darktable.modules.lib.styles:set_text([[The style selection menu]])
 darktable.modules.lib.metadata_view:set_text([[The widget displaying metadata about the current image]])
 darktable.modules.lib.metadata:set_text([[The widget allowing modification of metadata fields on the current image]])
@@ -391,7 +418,6 @@ darktable.modules.lib.copy_history:set_text([[The UI element that manipulates hi
 darktable.modules.lib.image:set_text([[The UI element that manipulates the current image]])
 darktable.modules.lib.modulegroups:set_text([[The icons describing the different iop groups]])
 darktable.modules.lib.module_toolbox:set_text([[The tools on the bottom line of the UI (overexposure)]])
-darktable.modules.lib.snapshots:set_text([[The UI element that manipulates snapshots in darkroom]])
 darktable.modules.lib.session:set_text([[The session UI when tethering]])
 darktable.modules.lib.histogram:set_text([[The histogram widget]])
 darktable.modules.lib.export:set_text([[The export menu]])
@@ -418,9 +444,15 @@ darktable.debug.dump:set_text([[This will return a string describing everything 
 This function is recursion-safe and can be used to dump _G if needed.]])
 darktable.debug.dump:add_parameter("object","anything",[[The object to dump.]])
 darktable.debug.dump:add_parameter("name","string",[[A name to use for the object.]]):set_attribute("optional",true)
+tmp_node = darktable.debug.dump:add_parameter("known","table",[[A table of object,string pairs. Any object in that table will not be dumped, the string will be printed instead.]]..para().."defaults to "..my_tostring(darktable.debug.known).." if not set")
+tmp_node:set_attribute("optional",true)
 darktable.debug.dump:add_return("string",[[A string containing a text description of the object - can be very long.]])
 
 darktable.debug.debug:set_text([[Initialized to false; set it to true to also dump information about metatables.]])
+darktable.debug.max_depth:set_text([[Initialized to 10; The maximum depth to recursively dump content.]])
+
+remove_all_children(darktable.debug.known) -- debug values, not interesting
+darktable.debug.known:set_text([[A table containing the default value of ]]..my_tostring(tmp_node))
 darktable.debug.type:set_text([[Similar to the system function type() but it will return the real type instead of "userdata" for darktable specific objects.]])
 darktable.debug.type:add_parameter("object","anything",[[The object whos type must be reported.]])
 darktable.debug.type:add_return("string",[[A string describing the type of the object.]])
@@ -459,8 +491,8 @@ types.dt_lua_image_t.exif_iso:set_text([[The iso used on the image.]])
 types.dt_lua_image_t.exif_datetime_taken:set_text([[The date and time of the image.]])
 types.dt_lua_image_t.exif_focus_distance:set_text([[The distance of the subject.]])
 types.dt_lua_image_t.exif_crop:set_text([[The exif crop data.]])
-types.dt_lua_image_t.latitude:set_text([[GPS latitude data of the image.]])
-types.dt_lua_image_t.longitude:set_text([[GPS longitude data of the image.]])
+types.dt_lua_image_t.latitude:set_text([[GPS latitude data of the image, nil if not set.]]):add_version_info("the field is now nil instead of NAN if not set")
+types.dt_lua_image_t.longitude:set_text([[GPS longitude data of the image, nil if not set.]]):add_version_info("the field is now nil instead of NAN if not set")
 types.dt_lua_image_t.is_raw:set_text([[True if the image is a RAW file.]])
 types.dt_lua_image_t.is_ldr:set_text([[True if the image is a ldr image.]])
 types.dt_lua_image_t.is_hdr:set_text([[True if the image is a hdr image.]])
@@ -579,7 +611,7 @@ types.dt_lib_module_t:add_version_info([[Type added]])
 types.dt_lib_module_t.id:set_text([[A unit string identifying the lib]])
 types.dt_lib_module_t.name:set_text([[The translated title of the UI element]])
 types.dt_lib_module_t.version:set_text([[The version of the internal data of this lib]])
-types.dt_lib_module_t.visible:set_text([[Whether the UI element is visible.]]..para()..
+types.dt_lib_module_t.visible:set_text([[Allow to make a lib module completely invisible to the user.]]..para()..
 [[Note that if the module is invisible the user will have no way to restore it without lua]])
 types.dt_lib_module_t.visible:set_attribute("implicit_yield",true)
 types.dt_lib_module_t.container:set_text([[The location of the lib in the darktable UI]])
@@ -587,6 +619,10 @@ types.dt_lib_module_t.expandable:set_text([[True if the lib can be expanded/retr
 types.dt_lib_module_t.expanded:set_text([[True if the lib is expanded]]);
 types.dt_lib_module_t.position:set_text([[A value deciding the position of the lib within its container]])
 types.dt_lib_module_t.views:set_text([[A table of all teh views that display this widget]])
+types.dt_lib_module_t.reset:set_text([[A function to reset the lib to its default values]]..para()..
+[[This function will do nothing if the lib is not visible or can't be reset]])
+types.dt_lib_module_t.reset:add_parameter("self",my_tostring(types.dt_lib_module_t),[[The lib to reset]])
+types.dt_lib_module_t.on_screen:set_text([[True if the lib is currently visible on the screen]])
 
 types.dt_view_t:set_text([[A darktable view]])
 types.dt_view_t:add_version_info([[Type added]])
@@ -595,12 +631,15 @@ types.dt_view_t.name:set_text([[The name of the view]])
 
 
 types.dt_lua_backgroundjob_t:set_text([[A lua-managed entry in the backgroundjob lib]]):add_version_info("type added")
-local job = real_darktable.modules.lib.backgroundjobs.create_job("test job",true)
-doc.document_type_from_obj(job,types.dt_lua_backgroundjob_t)
-job.valid = false
-job = nil
 types.dt_lua_backgroundjob_t.percent:set_text([[The value of the progress bar. nil if there is no progress bar]])
 types.dt_lua_backgroundjob_t.valid:set_text([[True if the job is displayed, set it to false to destroy the entry]]..para().."An invalid job cannot be made valid again")
+
+
+types.dt_lua_snapshot_t:set_text([[The description of a snapshot in the snapshot lib]]):add_version_info("type added")
+types.dt_lua_snapshot_t.filename:set_text([[The filename of an image containing the snapshot]])
+types.dt_lua_snapshot_t.select:set_text([[Activates this snapshot on the display. To deactivate all snapshot you need to call this function on the active snapshot]])
+types.dt_lua_snapshot_t.select:add_parameter("snapshot",my_tostring(types.dt_lua_snapshot_t),[[The snapshot to activate]])
+types.dt_lua_snapshot_t.name:set_text([[The name of the snapshot, as seen in the UI]])
 
 
 ----------------------
@@ -646,6 +685,10 @@ events["post-import-film"].callback:add_parameter("event","string",[[The name of
 
 events["post-import-film"].callback:add_parameter("film",my_tostring(types.dt_lua_film_t),[[The new film that has been added. If multiple films were added recursively only the top level film is reported.]])
 events["post-import-film"].extra_registration_parameters:set_text([[This event has no extra registration parameters.]])
+events["view-changed"]:set_text([[This event is triggered after the user changed the active view]])
+events["view-changed"].callback:add_parameter("old_view",my_tostring(types.dt_view_t),[[The view that we just left]])
+events["view-changed"].callback:add_parameter("new_view",my_tostring(types.dt_view_t),[[The view we are now in]])
+events["view-changed"].extra_registration_parameters:set_text([[This event has no extra registration parameters.]])
 ----------------------
 --  ATTRIBUTES      --
 ----------------------

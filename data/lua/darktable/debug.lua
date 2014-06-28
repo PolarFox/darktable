@@ -4,7 +4,7 @@ local dt = require "darktable"
 local debug = require "debug"
 local introspect_internal
 local introspect_body
-local M = {debug = false}
+local M = {debug = false, max_depth = 10, known = {[_G] = "_G", [_ENV] = "_ENV" }}
 local depth = 0;
 
 local function get_userdata_type(object)
@@ -52,12 +52,23 @@ local function introspect_metatable(object,indent,name,known,ancestors)
 	table.remove(ancestors);
 	return result
 end
+local function introspect_uservalue(object,indent,name,known,ancestors)
+	if not M.debug then return "" end
+	if name == nil then name = "(unknown)" end
+	local uservalue = debug.getuservalue(object);
+	if uservalue ==  nil then return indent.."(no uservalue)\n" end
+	local result = indent..name..".uservalue"
+	table.insert(ancestors,name)
+	result = result..introspect_body(uservalue,indent..indent_string,"uservalue",known,ancestors)
+	table.remove(ancestors);
+	return result
+end
 
 
 introspect_body = function (object,indent,name,known,ancestors)
 	if name == nil then name = "(unknown)" end
 	local result = ""
-	if #indent > 10*#indent_string then
+	if #indent > M.max_depth*#indent_string then
 		return "max depth\n"
 	end
 	local obj_expand_mode = type(object)
@@ -85,6 +96,7 @@ introspect_body = function (object,indent,name,known,ancestors)
 			table.remove(ancestors);
 		end
 		result = result..introspect_metatable(object,indent..indent_string,name,known,ancestors)
+		result = result..introspect_uservalue(object,indent..indent_string,name,known,ancestors)
 		return result;
 	elseif obj_expand_mode == "function" then
 		return "\n"
@@ -105,6 +117,7 @@ introspect_body = function (object,indent,name,known,ancestors)
 			end
 		end
 		result = result..introspect_metatable(object,indent..indent_string,name,known,ancestors)
+		result = result..introspect_uservalue(object,indent..indent_string,name,known,ancestors)
 		return result
 	end
 	error("unknown type of object")
@@ -118,11 +131,21 @@ end
 
 
 
-function M.dump(object,name) 
+function M.dump(object,name,orig_known) 
 	if name == nil or name == "" then
 		name = "toplevel"
 	end
-	return introspect_internal(object,"",name,{},{})
+	if orig_known == nil then
+		orig_known = M.known
+	end
+	local known = {}
+	for k,v in pairs(orig_known) do
+		known[key(k)] = v
+	end
+	if(key(object)) then
+		known[key(object)] = nil -- always document the object that was actually asked
+	end
+	return introspect_internal(object,"",name,known,{})
 end
 
 function M.type(object)

@@ -108,6 +108,9 @@ static int usage(const char *argv0)
   printf(" [--configdir <user config directory>]");
   printf(" [--cachedir <user cache directory>]");
   printf(" [--localedir <locale directory>]");
+#ifdef USE_LUA
+  printf(" [--luacmd <lua command>]");
+#endif
   printf(" [--conf <key>=<value>]");
   printf("\n");
   return 1;
@@ -356,7 +359,7 @@ int dt_load_from_string(const gchar* input, gboolean open_image_in_dr)
   return id;
 }
 
-int dt_init(int argc, char *argv[], const int init_gui)
+int dt_init(int argc, char *argv[], const int init_gui,lua_State *L)
 {
 #ifndef __WIN32__
   if(getuid() == 0 || geteuid() == 0)
@@ -456,6 +459,8 @@ int dt_init(int argc, char *argv[], const int init_gui)
   char *configdir_from_command = NULL;
   char *cachedir_from_command = NULL;
 
+  char *lua_command  __attribute__((unused))= NULL;
+
   darktable.num_openmp_threads = 1;
 #ifdef _OPENMP
   darktable.num_openmp_threads = omp_get_num_procs();
@@ -543,7 +548,8 @@ int dt_init(int argc, char *argv[], const int init_gui)
       else if(!strcmp(argv[k], "--conf"))
       {
         gchar *keyval = g_strdup(argv[++k]), *c = keyval;
-        while(*c != '=' && c < keyval + strlen(keyval)) c++;
+        gchar *end = keyval + strlen(keyval);
+        while(*c != '=' && c < end) c++;
         if(*c == '=' && *(c+1) != '\0')
         {
           *c++ = '\0';
@@ -553,6 +559,10 @@ int dt_init(int argc, char *argv[], const int init_gui)
           config_override = g_slist_append(config_override, entry);
         }
         g_free(keyval);
+      }
+      else if(!strcmp(argv[k], "--luacmd"))
+      {
+        lua_command = argv[++k];
       }
     }
 #ifndef MAC_INTEGRATION
@@ -601,7 +611,7 @@ int dt_init(int argc, char *argv[], const int init_gui)
   gegl_init(&argc, &argv);
 #endif
 #ifdef USE_LUA
-  dt_lua_init_early(NULL);
+  dt_lua_init_early(L);
 #endif
 
   // thread-safe init:
@@ -842,7 +852,7 @@ int dt_init(int argc, char *argv[], const int init_gui)
 
   /* init lua last, since it's user made stuff it must be in the real environment */
 #ifdef USE_LUA
-  dt_lua_init(darktable.lua_state.state,init_gui);
+  dt_lua_init(darktable.lua_state.state,lua_command);
 #endif
 
   // last but not least construct the popup that asks the user about images whose xmp files are newer than the db entry

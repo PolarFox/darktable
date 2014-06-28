@@ -41,7 +41,7 @@ gchar *dt_util_dstrcat(gchar *str,const gchar *format, ... )
   va_list args;
   gchar *ns;
   va_start(args, format);
-  int clen = str ? strlen(str) : 0;
+  size_t clen = str ? strlen(str) : 0;
   int alen = g_vsnprintf(NULL, 0, format, args);
   int nsize = alen + clen + 1;
 
@@ -143,15 +143,14 @@ gchar* dt_util_glist_to_str(const gchar* separator, GList * items, const unsigne
     while((items=g_list_next(items)) != NULL);
   }
   g_list_free(items);
-  if(strings != NULL)
-    g_free(strings);
+  g_free(strings);
 
   return result;
 }
 
 gchar* dt_util_fix_path(const gchar* path)
 {
-  if (path == NULL || strlen(path) == 0)
+  if (path == NULL || *path == '\0')
   {
     return NULL;
   }
@@ -161,7 +160,7 @@ gchar* dt_util_fix_path(const gchar* path)
   /* check if path has a prepended tilde */
   if (path[0] == '~')
   {
-    int len    = strlen(path);
+    size_t len = strlen(path);
     char* user = NULL;
     int off    = 1;
 

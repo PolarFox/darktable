@@ -4,7 +4,8 @@
 /*
     RawSpeed - RAW file decoder.
 
-    Copyright (C) 2009 Klaus Post
+    Copyright (C) 2009-2014 Klaus Post
+    Copyright (C) 2014 Pedro Côrte-Real
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -57,7 +58,7 @@ void TiffParser::parseData() {
     if (data[0] != 0x4D || data[1] != 0x4D)
       throw TiffParserException("Not a TIFF file (ID)");
 
-    if (data[3] != 42)
+    if (data[3] != 42 && data[2] != 0x4f) // ORF sometimes has 0x4f, Lovely!
       throw TiffParserException("Not a TIFF file (magic 42)");
   } else {
     tiff_endian = little;
@@ -133,7 +134,9 @@ RawDecoder* TiffParser::getDecoder() {
         mRootIFD = NULL;
         return new NefDecoder(root, mInput);
       }
-      if (!make.compare("OLYMPUS IMAGING CORP.")) {
+      if (!make.compare("OLYMPUS IMAGING CORP.") ||
+          !make.compare("OLYMPUS CORPORATION") ||
+          !make.compare("OLYMPUS OPTICAL CO.,LTD") ) {
         mRootIFD = NULL;
         return new OrfDecoder(root, mInput);
       }
@@ -157,8 +160,35 @@ RawDecoder* TiffParser::getDecoder() {
         mRootIFD = NULL;
         return new SrwDecoder(root, mInput);
       }
+      if (!make.compare("Mamiya-OP Co.,Ltd.")) {
+        mRootIFD = NULL;
+        return new MefDecoder(root, mInput);
+      }
+      if (!make.compare("Kodak")) {
+        mRootIFD = NULL;
+        return new DcrDecoder(root, mInput);
+      }
+      if (!make.compare("EASTMAN KODAK COMPANY")) {
+        mRootIFD = NULL;
+        return new KdcDecoder(root, mInput);
+      }
+      if (!make.compare("SEIKO EPSON CORP.")) {
+        mRootIFD = NULL;
+        return new ErfDecoder(root, mInput);
+      }
     }
   }
+
+  potentials = mRootIFD->getIFDsWithTag(SOFTWARE);
+  if (!potentials.empty()) {
+    string software = potentials[0]->getEntry(SOFTWARE)->getString();
+    TrimSpaces(software);
+    if (!software.compare("Camera Library")) {
+      mRootIFD = NULL;
+      return new MosDecoder(root, mInput);
+    }
+  }
+
   throw TiffParserException("No decoder found. Sorry.");
   return NULL;
 }
@@ -178,7 +208,6 @@ void TiffParser::MergeIFD( TiffParser* other_tiff)
   }
   other_root->mSubIFD.clear();
   other_root->mEntry.clear();
-  other_tiff->mRootIFD = NULL;
 }
 
 } // namespace RawSpeed
